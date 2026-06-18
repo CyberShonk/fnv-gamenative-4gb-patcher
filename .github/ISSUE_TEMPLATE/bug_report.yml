@@ -1,0 +1,83 @@
+name: Bug report
+description: Report a reproducible patching, restoration, or GameNative compatibility problem.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach FalloutNV.exe, game files, xNVSE binaries, Steamless binaries, or private filesystem information.
+  - type: input
+    id: patcher_version
+    attributes:
+      label: Patcher version or commit
+      placeholder: 0.1.0-alpha or commit hash
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Android device and Android version
+    validations:
+      required: true
+  - type: input
+    id: gamenative
+    attributes:
+      label: GameNative version
+    validations:
+      required: true
+  - type: input
+    id: proton
+    attributes:
+      label: Proton version
+    validations:
+      required: true
+  - type: input
+    id: xnvse
+    attributes:
+      label: xNVSE version
+    validations:
+      required: true
+  - type: dropdown
+    id: unpacked
+    attributes:
+      label: Was GameNative executable unpacking completed?
+      options:
+        - "Yes"
+        - "No"
+        - "Unsure"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List the exact sequence that causes the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Complete patcher output
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant xNVSE log text
+      description: Paste only relevant text. Remove private paths or identifiers.
+      render: text
+  - type: input
+    id: hash
+    attributes:
+      label: SHA-256 of FalloutNV.exe
+      description: A hash is safe to share. Do not attach the executable.
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have not attached game files or third-party binaries.
+          required: true
