@@ -1,0 +1,35 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Synthetic PE test
+        run: python3 tests/test_synthetic_pe.py build/FNVGameNativePatcher
+
+  windows-i686:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-i686
+      - name: Build static 32-bit Windows executable
+        run: >-
+          i686-w64-mingw32-g++
+          -std=c++17 -O2 -Wall -Wextra -Wpedantic
+          -static -static-libgcc -static-libstdc++
+          src/main.cpp -o FNVGameNativePatcher.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FNVGameNativePatcher-windows-i686
+          path: FNVGameNativePatcher.exe
