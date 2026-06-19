@@ -5,6 +5,29 @@ All notable changes to this project will be documented here.
 The project is still pre-release. Version numbers describe development milestones and do not imply verified GameNative compatibility unless stated explicitly.
 
 
+## 0.1.2-alpha
+
+### Added
+
+- Managed support for GameNative's persistent `FalloutNV.exe.unpacked.exe` cache.
+- Separate non-`.exe` backups and temporary files for both the normal launch executable and cached unpacked executable.
+- Pair validation that refuses mismatched clean executable bytes before writing.
+- `--verify` reporting for both executable copies and explicit persistent-cache coverage.
+- Upgrade handling for the `0.1.1-alpha` state where only `FalloutNV.exe` was patched.
+- Synthetic tests that simulate GameNative copying the cached executable back over `FalloutNV.exe`.
+
+### Changed
+
+- The default patch operation now requires GameNative to have completed Unpack Files once.
+- The cached executable is installed first, followed by the normal launch executable, so the overwrite source is secured before the launch target.
+- Patch preparation, backup validation, temporary-file verification, installation, and rollback now operate across the executable pair.
+- `--restore` restores both managed backups when present.
+
+### Validation status
+
+- Synthetic pair patching, repeat safety, simulated cache overwrite, restoration, mismatched-pair refusal, missing-cache refusal, and `0.1.1-alpha` upgrade behavior pass locally.
+- Real-device validation of this cache-persistence revision is still required before release.
+
 ## 0.1.1-alpha
 
 ### Added

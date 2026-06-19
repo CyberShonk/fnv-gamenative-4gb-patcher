@@ -1,0 +1,7 @@
+/var/home/shonk/Desktop/Active projects/FNV GameNative Patcher/source/FNVGameNativePatcher/build-authenticode/CMakeFiles/FNVGameNativePatcher.dir
+/var/home/shonk/Desktop/Active projects/FNV GameNative Patcher/source/FNVGameNativePatcher/build-authenticode/CMakeFiles/edit_cache.dir
+/var/home/shonk/Desktop/Active projects/FNV GameNative Patcher/source/FNVGameNativePatcher/build-authenticode/CMakeFiles/rebuild_cache.dir
+/var/home/shonk/Desktop/Active projects/FNV GameNative Patcher/source/FNVGameNativePatcher/build-authenticode/CMakeFiles/list_install_components.dir
+/var/home/shonk/Desktop/Active projects/FNV GameNative Patcher/source/FNVGameNativePatcher/build-authenticode/CMakeFiles/install.dir
+/var/home/shonk/Desktop/Active projects/FNV GameNative Patcher/source/FNVGameNativePatcher/build-authenticode/CMakeFiles/install/local.dir
+/var/home/shonk/Desktop/Active projects/FNV GameNative Patcher/source/FNVGameNativePatcher/build-authenticode/CMakeFiles/install/strip.dir

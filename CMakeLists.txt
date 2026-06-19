@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(FNVGameNativePatcher VERSION 0.1.1 LANGUAGES CXX)
+project(FNVGameNativePatcher VERSION 0.1.2 LANGUAGES CXX)
 
 add_executable(FNVGameNativePatcher src/main.cpp)
 target_compile_features(FNVGameNativePatcher PRIVATE cxx_std_17)

@@ -1,47 +1,52 @@
 # FNV GameNative 4GB + xNVSE Patcher
 
-A standalone compatibility patcher for a legitimate Steam copy of **Fallout: New Vegas** after GameNative has unpacked `FalloutNV.exe`.
+A standalone compatibility patcher for a legitimate Steam copy of **Fallout: New Vegas** after GameNative has completed its executable-unpacking process.
 
-> **Development status:** `0.1.1-alpha`. The structural transformation has been validated against synthetic fixtures and a real GameNative-unpacked Steam executable copy. Android runtime validation of xNVSE initialization is still required before a public release.
+> **Development status:** `0.1.2-alpha`. The previous `0.1.1-alpha` transformation and xNVSE launch path were validated on an AYN Thor. This revision adds persistent handling for GameNative's cached `FalloutNV.exe.unpacked.exe`; that paired-file workflow still requires real-device validation before public release.
 
 ## Why this project exists
 
-This project began after Discord member **Vault 13 Dweller** reported that the established FNV 4GB Patcher rejected their `FalloutNV.exe`.
+GameNative uses Steamless to unpack the Steam executable. Current GameNative behavior leaves two relevant files:
 
-Investigation showed that GameNative’s executable-unpacking process changes the Steam executable. That changes the executable’s hash, so a patcher designed around known desktop executable versions no longer recognizes it.
+- `FalloutNV.exe` — the normal launch target.
+- `FalloutNV.exe.unpacked.exe` — GameNative's cached unpacked result, which it can copy over the normal executable.
 
-FNV GameNative 4GB + xNVSE Patcher is an independent implementation designed specifically for that workflow. It structurally examines the unpacked executable, enables Large Address Aware support, and prepares the normal `FalloutNV.exe` launch path to load the user’s separately installed xNVSE files.
+Patching only `FalloutNV.exe` is therefore not persistent. A later GameNative copy can restore the unpatched cached bytes.
 
-This repository solves one focused compatibility problem. The tested capability is also intended for later integration into a GameNative helper for [Droid Mod Loader](https://github.com/CyberShonk/DroidModLoader) as part of a broader effort to make established Bethesda modding workflows practical in Android Windows containers.
+This patcher independently examines the unpacked PE files, enables Large Address Aware support, and adds an early loader for the user's separately installed `nvse_steam_loader.dll`. It does not include Fallout: New Vegas, xNVSE, Steamless, GameNative files, or code and binaries from the existing FNV 4GB Patcher.
 
-The project does not include Fallout: New Vegas, xNVSE, Steamless, or code and binaries from the existing FNV 4GB Patcher.
+## What 0.1.2-alpha does
 
-## What the patcher is intended to do
+- Requires both GameNative unpacked executable copies to be present.
+- Validates that both are supported PE32/x86 Fallout: New Vegas executables.
+- Refuses mismatched clean executable-pair bytes.
+- Repairs the tested stale Authenticode pointer left by GameNative/Steamless.
+- Enables `IMAGE_FILE_LARGE_ADDRESS_AWARE` without replacing unrelated flags.
+- Adds a `.gnvse` section that loads `nvse_steam_loader.dll` before the original entry point.
+- Patches `FalloutNV.exe.unpacked.exe` first, then `FalloutNV.exe`.
+- Saves separate backups that do not end in `.exe`:
+  - `FalloutNV.exe.unpacked.exe.gn4gb-backup`
+  - `FalloutNV.exe.gn4gb-backup`
+- Detects previous patching and upgrades the `0.1.1-alpha` state where only the normal executable was patched.
+- Reports whether both launch copies have persistent cache coverage.
+- Restores both managed executable copies when backups are available.
 
-- Validate that `FalloutNV.exe` is a supported 32-bit x86 Portable Executable.
-- Classify the executable before writing any files and report the recommended next action.
-- Refuse to patch the still-packed Steam executable, malformed metadata, or an unsafe layout.
-- Repair the specific stale Authenticode pointer left by the tested GameNative/Steamless unpacking workflow.
-- Enable `IMAGE_FILE_LARGE_ADDRESS_AWARE` without replacing unrelated header flags.
-- Add a small `.gnvse` section that loads `nvse_steam_loader.dll` before the original game entry point.
-- Preserve the filename `FalloutNV.exe` so GameNative can launch it normally.
-- Save the original unpacked executable as `FalloutNV.exe.gn4gb-backup`.
-- Detect previous patching so repeat runs do not append duplicate changes.
-- Provide verification and restoration commands.
-
-See [Technical overview](docs/TECHNICAL_OVERVIEW.md) for the implementation design.
+The patcher does **not** modify GameNative's `FalloutNV.exe.original.exe` safety copy.
 
 ## Intended user workflow
 
-The following workflow is provisional until real-device testing is complete:
-
 1. Install a legitimate Steam copy of Fallout: New Vegas through GameNative.
-2. Allow GameNative to complete its executable-unpacking process.
-3. Install the current xNVSE release into the folder containing `FalloutNV.exe`.
-4. Copy `FNVGameNativePatcher.exe` into that folder.
-5. Run the patcher once.
-6. Launch the normal `FalloutNV.exe` entry through GameNative.
-7. Confirm xNVSE initialized by checking `nvse_steam_loader.log` and `nvse.log`.
+2. Ensure **Unpack Files** is enabled.
+3. Launch the game once and allow GameNative's DRM handling to finish.
+4. Close the game.
+5. Install the current xNVSE release into the folder containing `FalloutNV.exe`.
+6. Copy `FNVGameNativePatcher.exe` into that folder and run it once.
+7. Launch the normal `FalloutNV.exe` entry through GameNative.
+8. Confirm xNVSE initialized using `nvse_steam_loader.log` and `nvse.log`.
+
+No executable renaming should be required. After both files are patched, the user should not need to disable **Unpack Files** for ordinary launches.
+
+If `FalloutNV.exe.unpacked.exe` is missing, the patcher refuses to make a non-persistent change and explains how to let GameNative create the pair first.
 
 ## Commands
 
@@ -56,23 +61,24 @@ FNVGameNativePatcher.exe --help
 
 The alpha build intentionally refuses to patch when:
 
-- the executable is not PE32 x86;
+- either managed executable is missing;
+- the clean executable pair does not match byte for byte;
+- a target is not PE32 x86;
 - the Steam `.bind` wrapper is still present;
 - `nvse_steam_loader.dll` or `nvse_1_4.dll` is missing;
-- the executable uses `DYNAMIC_BASE`/ASLR;
+- a target uses `DYNAMIC_BASE`/ASLR;
 - actual Authenticode certificate data remains inside the file;
-- the Authenticode security-directory entry is malformed;
+- Authenticode metadata is malformed;
 - no safe empty PE section-header slot is available;
-- the executable does not import `LoadLibraryA`;
-- the executable lacks expected Fallout: New Vegas identity strings.
+- `LoadLibraryA` cannot be located;
+- expected Fallout: New Vegas identity strings are absent;
+- a pre-existing backup conflicts with the current clean target.
 
-A nonzero Authenticode entry is accepted only when it is the tested stale form: both fields are structurally valid, but the referenced certificate range is outside the unpacked file because the certificate data was removed. The patcher clears that dead pointer before applying its own changes.
+All transformed bytes are constructed and verified in memory before backups or temporary executables are created. Both temporary files are verified before installation. The cache is installed first so GameNative's overwrite source is protected before the normal launch target is replaced.
 
-Unknown layouts should fail with a clear condition report and recommended next action rather than be patched speculatively. Classification and the full patch transformation occur in memory before the backup or temporary file is created.
+See [Technical overview](docs/TECHNICAL_OVERVIEW.md) and [Testing](docs/TESTING.md).
 
 ## Building
-
-### Native development build
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -80,43 +86,42 @@ cmake --build build
 python3 tests/test_synthetic_pe.py build/FNVGameNativePatcher
 ```
 
-### Windows artifact
+GitHub Actions cross-compiles a static 32-bit Windows executable using MinGW. Development artifacts are not public releases.
 
-GitHub Actions cross-compiles a static 32-bit Windows executable using MinGW. Build artifacts from development branches are test artifacts, not public releases.
+## Validation status
 
-## Testing status
+`0.1.1-alpha` was validated on an AYN Thor with a real GameNative-unpacked Steam executable: patching succeeded, the game launched, and xNVSE initialized through the normal `FalloutNV.exe` path.
 
-The automated test currently covers:
+The `0.1.2-alpha` synthetic test suite additionally covers:
 
-- clean unpacked verification and patching;
-- stale Authenticode detection, repair, and restoration;
-- refusal without file writes for `.bind`, malformed metadata, actual certificate data, an unsupported identity, and malformed PE input;
-- Large Address Aware and patch-marker verification;
+- paired patching and exact restoration;
+- simulated copying of `FalloutNV.exe.unpacked.exe` over `FalloutNV.exe`;
+- missing-cache refusal;
+- mismatched-pair refusal;
 - repeat-run safety;
-- byte-for-byte restoration.
+- stale Authenticode repair;
+- upgrade from the prior primary-only patch state.
 
-The implementation has also completed an offline patch, verification, and byte-for-byte restoration cycle against a real GameNative-unpacked Steam executable copy. This does **not** establish Android runtime or xNVSE compatibility. See [Testing](docs/TESTING.md) for the release validation matrix.
+Real-device validation of the paired persistence workflow remains required.
 
 ## Independence and credits
 
-This project is an independent implementation based on the documented Microsoft PE format and xNVSE’s loader architecture. The existing FNV 4GB Patcher source was inspected to understand the compatibility failure, but this repository does not include its source expressions, patch arrays, fixed offsets, binaries, or assets.
+This is an independent implementation based on the documented Microsoft PE format and xNVSE's loader architecture. The existing FNV 4GB Patcher source was inspected to understand the compatibility failure, but this repository does not include its source expressions, patch arrays, fixed offsets, binaries, or assets.
 
 Credits:
 
-- **Vault 13 Dweller**: reported the GameNative incompatibility that prompted the project.
-- **Roy Batty and LuthienAnarion**: creators of the established FNV 4GB Patcher and direct-launch workflow.
-- **The xNVSE team**: xNVSE and `nvse_steam_loader.dll`.
-- **Utkarsh Dalal and GameNative contributors**: GameNative.
-- **atom0s**: Steamless.
-- **CyberShonk**: independent implementation and maintenance.
+- **Vault 13 Dweller** — reported the GameNative incompatibility that prompted the project.
+- **Roy Batty and LuthienAnarion** — creators of the established FNV 4GB Patcher and direct-launch workflow.
+- **The xNVSE team** — xNVSE and `nvse_steam_loader.dll`.
+- **Utkarsh Dalal and GameNative contributors** — GameNative.
+- **atom0s** — Steamless.
+- **CyberShonk** — independent implementation and maintenance.
 
 Crediting a person or project does not imply endorsement.
 
 ## Relationship to Droid Mod Loader
 
-This patcher is intended to remain useful as a standalone tool. After the GameNative workflow is verified, the capability may also be integrated into a future GameNative helper for Droid Mod Loader, potentially adding automatic detection, diagnostics, managed backups, restoration, and support for other verified 32-bit Bethesda games.
-
-Those are future plans, not features of the current patcher.
+This patcher remains a standalone utility. The validated capability may later be integrated into a broader GameNative helper for Droid Mod Loader, with automatic detection, diagnostics, managed backups, restoration, and support for other verified 32-bit Bethesda games. Those are future plans, not current features.
 
 ## Legal and affiliation notice
 

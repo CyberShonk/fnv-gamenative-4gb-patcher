@@ -16,10 +16,13 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr const char* kToolName = "FNV GameNative 4GB + xNVSE Patcher";
-constexpr const char* kToolVersion = "0.1.1-alpha";
+constexpr const char* kToolVersion = "0.1.2-alpha";
 constexpr const char* kTargetName = "FalloutNV.exe";
+constexpr const char* kCacheTargetName = "FalloutNV.exe.unpacked.exe";
 constexpr const char* kBackupName = "FalloutNV.exe.gn4gb-backup";
+constexpr const char* kCacheBackupName = "FalloutNV.exe.unpacked.exe.gn4gb-backup";
 constexpr const char* kTempName = "FalloutNV.exe.gn4gb-temp";
+constexpr const char* kCacheTempName = "FalloutNV.exe.unpacked.exe.gn4gb-temp";
 constexpr const char* kSectionName = ".gnvse";
 constexpr const char* kMarker = "FNVGN4GB-V1";
 constexpr std::uint16_t kMachineI386 = 0x014c;
@@ -577,7 +580,7 @@ std::vector<std::uint8_t> patch_image(
 void replace_target_safely(const fs::path& target, const fs::path& temp, const fs::path& backup) {
     std::error_code ec;
     fs::remove(target, ec);
-    if (ec) throw Error("Unable to replace FalloutNV.exe: " + ec.message());
+    if (ec) throw Error("Unable to replace " + target.filename().string() + ": " + ec.message());
     ec.clear();
     fs::rename(temp, target, ec);
     if (!ec) return;
@@ -585,9 +588,13 @@ void replace_target_safely(const fs::path& target, const fs::path& temp, const f
     std::error_code restore_error;
     fs::copy_file(backup, target, fs::copy_options::overwrite_existing, restore_error);
     if (restore_error) {
-        throw Error("Failed to install the patched executable and failed to restore the backup. Manual recovery file: " + backup.string());
+        throw Error(
+            "Failed to install " + target.filename().string() +
+            " and failed to restore its backup. Manual recovery file: " + backup.string());
     }
-    throw Error("Failed to install the patched executable; the original was restored: " + ec.message());
+    throw Error(
+        "Failed to install " + target.filename().string() +
+        "; the original was restored: " + ec.message());
 }
 
 void verify_environment(const fs::path& directory) {
@@ -599,146 +606,423 @@ void verify_environment(const fs::path& directory) {
     }
 }
 
-void patch(const fs::path& directory) {
-    const fs::path target = directory / kTargetName;
-    const fs::path backup = directory / kBackupName;
-    const fs::path temp = directory / kTempName;
-    if (!fs::exists(target)) {
-        throw Error("Status: FalloutNV.exe was not found in the current folder.\nNo files were changed.\nNext action: Copy the patcher into the folder containing FalloutNV.exe and run it again.");
-    }
+struct ManagedExecutable {
+    std::string name;
+    fs::path target;
+    fs::path backup;
+    fs::path temp;
+};
 
-    const auto original = read_file(target);
-    PeImage parsed;
+struct PatchPlan {
+    ManagedExecutable file;
+    std::vector<std::uint8_t> original;
+    std::vector<std::uint8_t> patched_data;
+    ExecutableInspection inspection;
+    bool needs_write{};
+    bool created_backup{};
+    bool installed{};
+};
+
+std::vector<ManagedExecutable> managed_executables(const fs::path& directory) {
+    // Cache first is intentional: once it is patched, a GameNative copy can no
+    // longer overwrite FalloutNV.exe with an unpatched cached executable.
+    return {
+        {kCacheTargetName, directory / kCacheTargetName, directory / kCacheBackupName, directory / kCacheTempName},
+        {kTargetName, directory / kTargetName, directory / kBackupName, directory / kTempName},
+    };
+}
+
+PeImage parse_managed_executable(
+    const std::vector<std::uint8_t>& data,
+    const ManagedExecutable& file) {
+
     try {
-        parsed = parse_pe(original);
+        return parse_pe(data);
     } catch (const std::exception& error) {
         throw Error(
-            std::string("Status: FalloutNV.exe contains malformed or unsupported PE data.\n") +
+            "Status: " + file.name + " contains malformed or unsupported PE data.\n" +
             "Details: " + error.what() + "\n" +
-            "No files were changed.\n" +
-            "Next action: Restore a clean FalloutNV.exe, run GameNative's unpack operation again, then rerun --verify.");
+            "No executable files were changed.\n" +
+            "Next action: Restore a clean Steam FalloutNV.exe, let GameNative unpack it again, then rerun --verify.");
+    }
+}
+
+void verify_patched_result(
+    const std::vector<std::uint8_t>& data,
+    const std::string& name,
+    const char* phase) {
+
+    const auto pe = parse_pe(data);
+    if (!is_patched(data, pe) ||
+        (pe.characteristics & kLargeAddressAware) == 0 ||
+        inspect_authenticode(data, pe).state != AuthenticodeState::None) {
+        throw Error(std::string(phase) + " verification failed for " + name + ".");
+    }
+}
+
+void validate_backup(const PatchPlan& plan) {
+    if (!fs::exists(plan.file.backup)) return;
+
+    const auto backup_data = read_file(plan.file.backup);
+    PeImage backup_pe;
+    try {
+        backup_pe = parse_pe(backup_data);
+    } catch (const std::exception& error) {
+        throw Error(
+            "Existing backup " + plan.file.backup.filename().string() +
+            " is malformed or unsupported: " + error.what() + "\n" +
+            "No executable files were changed.\n" +
+            "Next action: Preserve or rename that backup before patching.");
+    }
+    if (is_patched(backup_data, backup_pe)) {
+        throw Error(
+            "Existing backup " + plan.file.backup.filename().string() +
+            " already contains this patch. No executable files were changed. Preserve or rename it, then restore a clean GameNative-unpacked executable before continuing.");
+    }
+    if (backup_data != plan.original) {
+        throw Error(
+            "Existing backup " + plan.file.backup.filename().string() +
+            " does not match the current unpatched " + plan.file.name +
+            ". No executable files were changed. Preserve or rename the backup before continuing.");
+    }
+}
+
+bool load_clean_reference(const PatchPlan& plan, std::vector<std::uint8_t>& output) {
+    if (plan.needs_write) {
+        output = plan.original;
+        return true;
+    }
+    if (!fs::exists(plan.file.backup)) return false;
+
+    output = read_file(plan.file.backup);
+    const auto pe = parse_pe(output);
+    if (is_patched(output, pe)) {
+        throw Error(
+            "Backup " + plan.file.backup.filename().string() +
+            " contains this patch and cannot validate the executable pair.");
+    }
+    return true;
+}
+
+void validate_executable_pair(const std::vector<PatchPlan>& plans) {
+    if (plans.size() != 2) throw Error("Internal executable-pair configuration error.");
+
+    const auto& cache = plans[0];
+    const auto& primary = plans[1];
+    if (!cache.needs_write && !primary.needs_write && cache.original != primary.original) {
+        throw Error(
+            "Both executable copies contain the patch marker, but their bytes differ. No files were changed.\n"
+            "Next action: Preserve both backups, use --restore, confirm the clean executable pair matches, then patch again.");
     }
 
-    const ExecutableInspection inspection = inspect_executable(original, parsed);
-    if (inspection.condition == ExecutableCondition::AlreadyPatched) {
-        print_inspection_report(inspection, directory, "Patch result");
-        std::cout << "No files were changed.\n";
+    std::vector<std::uint8_t> cache_clean;
+    std::vector<std::uint8_t> primary_clean;
+    const bool cache_known = load_clean_reference(cache, cache_clean);
+    const bool primary_known = load_clean_reference(primary, primary_clean);
+    if (cache_known && primary_known && cache_clean != primary_clean) {
+        throw Error(
+            "FalloutNV.exe and FalloutNV.exe.unpacked.exe do not originate from the same unpacked executable bytes. No files were changed.\n"
+            "Next action: Let GameNative recreate a matching executable pair, then rerun --verify before patching.");
+    }
+}
+
+void remove_if_present(const fs::path& path) {
+    std::error_code ignored;
+    fs::remove(path, ignored);
+}
+
+void rollback_installed_plans(std::vector<PatchPlan>& plans, std::string& rollback_errors) {
+    for (auto it = plans.rbegin(); it != plans.rend(); ++it) {
+        if (!it->installed) continue;
+        std::error_code ec;
+        fs::copy_file(it->file.backup, it->file.target, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            if (!rollback_errors.empty()) rollback_errors += "\n";
+            rollback_errors +=
+                "Could not restore " + it->file.name + " from " +
+                it->file.backup.filename().string() + ": " + ec.message();
+        } else {
+            it->installed = false;
+        }
+    }
+}
+
+void print_cache_coverage(const fs::path& directory) {
+    const fs::path primary = directory / kTargetName;
+    const fs::path cache = directory / kCacheTargetName;
+    bool primary_patched = false;
+    bool cache_patched = false;
+
+    auto inspect_marker = [](const fs::path& path) {
+        if (!fs::exists(path)) return false;
+        try {
+            const auto data = read_file(path);
+            const auto pe = parse_pe(data);
+            return is_patched(data, pe);
+        } catch (...) {
+            return false;
+        }
+    };
+
+    primary_patched = inspect_marker(primary);
+    cache_patched = inspect_marker(cache);
+
+    std::cout << "GameNative persistence\n"
+              << "  FalloutNV.exe patched: " << (primary_patched ? "yes" : "no") << "\n"
+              << "  FalloutNV.exe.unpacked.exe present: " << (fs::exists(cache) ? "yes" : "no") << "\n"
+              << "  Cached executable patched: " << (cache_patched ? "yes" : "no") << "\n"
+              << "  Persistent cache coverage: " << ((primary_patched && cache_patched) ? "yes" : "no") << "\n";
+
+    if (primary_patched && cache_patched) {
+        std::cout << "  Recommended next action: Launch FalloutNV.exe normally through GameNative.\n";
+    } else if (!fs::exists(cache)) {
+        std::cout << "  Recommended next action: Make GameNative rerun Unpack Files, then close the game and rerun this patcher.\n";
+    } else {
+        std::cout << "  Recommended next action: Run the patcher to synchronize both executable copies.\n";
+    }
+}
+
+void patch(const fs::path& directory) {
+    const fs::path primary = directory / kTargetName;
+    const fs::path cache = directory / kCacheTargetName;
+    if (!fs::exists(primary)) {
+        throw Error(
+            "Status: FalloutNV.exe was not found in the current folder.\n"
+            "No files were changed.\n"
+            "Next action: Copy the patcher into the folder containing FalloutNV.exe and run it again.");
+    }
+    if (!fs::exists(cache)) {
+        throw Error(
+            "Status: FalloutNV.exe.unpacked.exe was not found.\n"
+            "No files were changed.\n"
+            "Next action: Make GameNative rerun Unpack Files for this game, close the game after DRM handling completes, then run this patcher again. Leave both executable names unchanged. If your GameNative build has no separate rerun action, toggling Unpack Files off and back on once may be necessary.");
+    }
+
+    std::vector<PatchPlan> plans;
+    for (const auto& file : managed_executables(directory)) {
+        PatchPlan plan;
+        plan.file = file;
+        plan.original = read_file(file.target);
+        const auto pe = parse_managed_executable(plan.original, file);
+        plan.inspection = inspect_executable(plan.original, pe);
+
+        if (plan.inspection.condition == ExecutableCondition::AlreadyPatched) {
+            plan.needs_write = false;
+        } else {
+            if (!is_patchable(plan.inspection.condition)) {
+                throw Error(
+                    "Executable " + file.name + " condition: " +
+                    condition_text(plan.inspection.condition) + ".\n" +
+                    "No executable files were changed.\n" +
+                    "Next action: " + recommended_action(plan.inspection.condition));
+            }
+            plan.patched_data = patch_image(plan.original, plan.inspection);
+            verify_patched_result(plan.patched_data, file.name, "In-memory preflight");
+            plan.needs_write = true;
+            validate_backup(plan);
+        }
+        plans.push_back(std::move(plan));
+    }
+
+    validate_executable_pair(plans);
+
+    const bool any_write = std::any_of(plans.begin(), plans.end(), [](const PatchPlan& plan) {
+        return plan.needs_write;
+    });
+    if (!any_write) {
+        for (auto it = plans.rbegin(); it != plans.rend(); ++it) {
+            print_inspection_report(it->inspection, directory, it->file.name.c_str());
+        }
+        std::cout << "No files were changed. Both GameNative launch copies are already patched.\n";
+        print_cache_coverage(directory);
         return;
     }
-    if (!is_patchable(inspection.condition)) throw_unpatchable(inspection);
 
     verify_environment(directory);
 
-    // Construct and validate the complete result in memory before creating or changing any file.
-    const auto patched = patch_image(original, inspection);
-    const auto patched_pe = parse_pe(patched);
-    if (!is_patched(patched, patched_pe) ||
-        (patched_pe.characteristics & kLargeAddressAware) == 0 ||
-        inspect_authenticode(patched, patched_pe).state != AuthenticodeState::None) {
-        throw Error("Internal preflight verification failed. No files were changed.");
+    try {
+        // Create every required backup before writing a temporary executable.
+        for (auto& plan : plans) {
+            if (!plan.needs_write || fs::exists(plan.file.backup)) continue;
+            std::error_code ec;
+            fs::copy_file(plan.file.target, plan.file.backup, fs::copy_options::none, ec);
+            if (ec) {
+                throw Error(
+                    "Unable to create non-EXE backup " +
+                    plan.file.backup.filename().string() + ": " + ec.message());
+            }
+            plan.created_backup = true;
+        }
+
+        // Constructed bytes were verified in memory; now verify their disk round trip.
+        for (auto& plan : plans) {
+            if (!plan.needs_write) continue;
+            write_file(plan.file.temp, plan.patched_data);
+            verify_patched_result(read_file(plan.file.temp), plan.file.name, "Temporary file");
+        }
+
+        // Plans are cache-first, then primary. This closes the overwrite path first.
+        for (auto& plan : plans) {
+            if (!plan.needs_write) continue;
+            replace_target_safely(plan.file.target, plan.file.temp, plan.file.backup);
+            plan.installed = true;
+            verify_patched_result(read_file(plan.file.target), plan.file.name, "Installed file");
+        }
+    } catch (const std::exception& error) {
+        for (auto& plan : plans) remove_if_present(plan.file.temp);
+
+        std::string rollback_errors;
+        rollback_installed_plans(plans, rollback_errors);
+        if (rollback_errors.empty()) {
+            for (auto& plan : plans) {
+                if (plan.created_backup) remove_if_present(plan.file.backup);
+            }
+            throw Error(std::string(error.what()) + "\nAll executable changes were rolled back.");
+        }
+        throw Error(
+            std::string(error.what()) + "\nRollback was incomplete. Preserve these backups and restore manually:\n" +
+            rollback_errors);
     }
 
-    if (fs::exists(backup)) {
-        const auto backup_data = read_file(backup);
-        PeImage backup_pe;
-        try {
-            backup_pe = parse_pe(backup_data);
-        } catch (const std::exception& error) {
-            throw Error(
-                std::string("Existing backup is malformed or unsupported: ") + error.what() + "\n" +
-                "No files were changed.\n" +
-                "Next action: Preserve or rename " + kBackupName + " before patching.");
+    std::cout << "Patched GameNative's Fallout: New Vegas executable pair successfully.\n";
+    for (const auto& plan : plans) {
+        std::cout << "  " << plan.file.name << ": "
+                  << (plan.needs_write ? "patched" : "already patched") << "\n";
+        if (plan.needs_write && plan.inspection.authenticode.state == AuthenticodeState::StaleOutOfBounds) {
+            std::cout << "    Stale GameNative Authenticode metadata cleared\n";
         }
-        if (is_patched(backup_data, backup_pe)) {
-            throw Error("Existing backup is already patched. No files were changed. Preserve or rename it, then restore a clean GameNative-unpacked FalloutNV.exe before continuing.");
+        if (plan.needs_write) {
+            std::cout << "    Original saved as " << plan.file.backup.filename().string() << "\n";
         }
-        if (backup_data != original) {
-            throw Error("An existing backup does not match the current unpatched FalloutNV.exe. No files were changed. Preserve or rename " + std::string(kBackupName) + " before patching this executable.");
-        }
-    } else {
-        std::error_code ec;
-        fs::copy_file(target, backup, fs::copy_options::none, ec);
-        if (ec) throw Error("Unable to create the non-EXE backup " + backup.string() + ": " + ec.message());
     }
-
-    write_file(temp, patched);
-    const auto round_trip = read_file(temp);
-    const auto round_trip_pe = parse_pe(round_trip);
-    if (!is_patched(round_trip, round_trip_pe) ||
-        (round_trip_pe.characteristics & kLargeAddressAware) == 0 ||
-        inspect_authenticode(round_trip, round_trip_pe).state != AuthenticodeState::None) {
-        std::error_code ignored;
-        fs::remove(temp, ignored);
-        throw Error("Temporary patched executable failed verification.");
-    }
-    replace_target_safely(target, temp, backup);
-    const auto installed = read_file(target);
-    const auto installed_pe = parse_pe(installed);
-    if (!is_patched(installed, installed_pe) ||
-        (installed_pe.characteristics & kLargeAddressAware) == 0 ||
-        inspect_authenticode(installed, installed_pe).state != AuthenticodeState::None) {
-        throw Error("Installed FalloutNV.exe failed final verification. Restore with --restore before launching the game.");
-    }
-    std::cout << "Patched FalloutNV.exe successfully.\n"
-              << "  Large Address Aware enabled\n"
-              << "  nvse_steam_loader.dll will load before the original entry point\n";
-    if (inspection.authenticode.state == AuthenticodeState::StaleOutOfBounds) {
-        std::cout << "  Stale GameNative Authenticode metadata cleared\n";
-    }
-    std::cout << "  Original saved as " << kBackupName << "\n";
+    std::cout << "  Large Address Aware enabled\n"
+              << "  nvse_steam_loader.dll will load before the original entry point\n"
+              << "  No executable renaming is required\n";
+    print_cache_coverage(directory);
 }
+
+struct RestorePlan {
+    ManagedExecutable file;
+    std::vector<std::uint8_t> backup_data;
+    bool needs_restore{};
+};
 
 void restore(const fs::path& directory) {
-    const fs::path target = directory / kTargetName;
-    const fs::path backup = directory / kBackupName;
-    const fs::path temp = directory / kTempName;
-    if (!fs::exists(backup)) throw Error("No " + std::string(kBackupName) + " backup was found.");
-    const auto backup_data = read_file(backup);
-    const auto backup_pe = parse_pe(backup_data);
-    if (is_patched(backup_data, backup_pe)) throw Error("Backup contains this patch and cannot be used for restoration.");
-    write_file(temp, backup_data);
+    std::vector<RestorePlan> plans;
+    bool found_backup = false;
 
-    replace_target_safely(target, temp, backup);
-    const auto restored = read_file(target);
-    const auto restored_pe = parse_pe(restored);
-    if (is_patched(restored, restored_pe)) throw Error("Restored executable still contains the GameNative patch marker.");
-    std::cout << "Restored FalloutNV.exe from " << kBackupName << ".\n";
+    for (const auto& file : managed_executables(directory)) {
+        RestorePlan plan;
+        plan.file = file;
+        if (fs::exists(file.backup)) {
+            found_backup = true;
+            plan.backup_data = read_file(file.backup);
+            const auto backup_pe = parse_pe(plan.backup_data);
+            if (is_patched(plan.backup_data, backup_pe)) {
+                throw Error(
+                    "Backup " + file.backup.filename().string() +
+                    " contains this patch and cannot be used for restoration. No files were changed.");
+            }
+            plan.needs_restore = true;
+        } else if (fs::exists(file.target)) {
+            const auto current = read_file(file.target);
+            try {
+                const auto current_pe = parse_pe(current);
+                if (is_patched(current, current_pe)) {
+                    throw Error(
+                        file.name + " is patched but its backup is missing. No files were changed. Preserve the file and restore its matching backup before using --restore.");
+                }
+            } catch (const Error&) {
+                throw;
+            } catch (...) {
+                // A malformed untracked companion is not replaced without a backup.
+            }
+        }
+        plans.push_back(std::move(plan));
+    }
+
+    if (!found_backup) {
+        throw Error(
+            "No managed backup was found. Expected " + std::string(kBackupName) +
+            " or " + kCacheBackupName + ".");
+    }
+
+    try {
+        for (auto& plan : plans) {
+            if (!plan.needs_restore) continue;
+            write_file(plan.file.temp, plan.backup_data);
+            const auto round_trip = read_file(plan.file.temp);
+            const auto pe = parse_pe(round_trip);
+            if (is_patched(round_trip, pe)) {
+                throw Error("Temporary restore file for " + plan.file.name + " still contains the patch marker.");
+            }
+        }
+        for (auto& plan : plans) {
+            if (!plan.needs_restore) continue;
+            replace_target_safely(plan.file.target, plan.file.temp, plan.file.backup);
+            const auto restored = read_file(plan.file.target);
+            const auto restored_pe = parse_pe(restored);
+            if (is_patched(restored, restored_pe)) {
+                throw Error("Restored " + plan.file.name + " still contains the GameNative patch marker.");
+            }
+        }
+    } catch (const std::exception& error) {
+        for (auto& plan : plans) remove_if_present(plan.file.temp);
+        throw Error(std::string(error.what()) + "\nBackups were preserved for manual recovery.");
+    }
+
+    for (const auto& plan : plans) {
+        if (plan.needs_restore) {
+            std::cout << "Restored " << plan.file.name << " from "
+                      << plan.file.backup.filename().string() << ".\n";
+        }
+    }
+    print_cache_coverage(directory);
 }
 
-void verify(const fs::path& directory) {
-    const fs::path target = directory / kTargetName;
-    if (!fs::exists(target)) {
-        std::cout << "Verification report\n"
-                  << "  Condition: FalloutNV.exe was not found\n"
+void print_single_verification(
+    const fs::path& directory,
+    const ManagedExecutable& file) {
+
+    std::cout << file.name << "\n";
+    if (!fs::exists(file.target)) {
+        std::cout << "  Condition: file not found\n"
                   << "  Patchable: no\n"
-                  << "  Files changed: no\n"
-                  << "  Recommended next action: Run this tool from the folder containing FalloutNV.exe.\n";
+                  << "  Files changed: no\n";
         return;
     }
 
-    const auto data = read_file(target);
+    const auto data = read_file(file.target);
     try {
         const auto pe = parse_pe(data);
         const auto inspection = inspect_executable(data, pe);
-        print_inspection_report(inspection, directory, "Verification report");
+        print_inspection_report(inspection, directory, "  Executable report");
         std::cout << "  Files changed: no\n";
     } catch (const std::exception& error) {
-        std::cout << "Verification report\n"
-                  << "  Condition: malformed or unsupported PE data\n"
+        std::cout << "  Condition: malformed or unsupported PE data\n"
                   << "  Details: " << error.what() << "\n"
                   << "  Patchable: no\n"
-                  << "  Files changed: no\n"
-                  << "  Recommended next action: Restore a clean FalloutNV.exe, run GameNative's unpack operation again, then rerun --verify.\n";
+                  << "  Files changed: no\n";
     }
+}
+
+void verify(const fs::path& directory) {
+    std::cout << "Verification report\n";
+    const auto files = managed_executables(directory);
+    // Human-facing order: normal launch target first, then GameNative cache.
+    print_single_verification(directory, files[1]);
+    print_single_verification(directory, files[0]);
+    print_cache_coverage(directory);
 }
 
 void print_help() {
     std::cout << kToolName << " " << kToolVersion << "\n\n"
-              << "Run this tool from the Fallout New Vegas game folder after GameNative has unpacked FalloutNV.exe.\n\n"
+              << "Run this tool from the Fallout New Vegas game folder after GameNative has completed Unpack Files once.\n"
+              << "The default action patches both FalloutNV.exe and FalloutNV.exe.unpacked.exe so GameNative cannot restore an unpatched cache.\n\n"
               << "Usage:\n"
-              << "  FNVGameNativePatcher.exe            Patch FalloutNV.exe\n"
-              << "  FNVGameNativePatcher.exe --verify   Show current state\n"
-              << "  FNVGameNativePatcher.exe --restore  Restore the original backup\n"
+              << "  FNVGameNativePatcher.exe            Patch and synchronize both executable copies\n"
+              << "  FNVGameNativePatcher.exe --verify   Show both executable states and persistence coverage\n"
+              << "  FNVGameNativePatcher.exe --restore  Restore every managed backup\n"
               << "  FNVGameNativePatcher.exe --help     Show this help\n";
 }
 
