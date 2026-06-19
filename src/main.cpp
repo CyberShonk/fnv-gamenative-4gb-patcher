@@ -16,7 +16,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr const char* kToolName = "FNV GameNative 4GB + xNVSE Patcher";
-constexpr const char* kToolVersion = "0.1.0-alpha";
+constexpr const char* kToolVersion = "0.1.1-alpha";
 constexpr const char* kTargetName = "FalloutNV.exe";
 constexpr const char* kBackupName = "FalloutNV.exe.gn4gb-backup";
 constexpr const char* kTempName = "FalloutNV.exe.gn4gb-temp";

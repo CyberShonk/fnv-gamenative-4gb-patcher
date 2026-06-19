@@ -4,7 +4,8 @@ All notable changes to this project will be documented here.
 
 The project is still pre-release. Version numbers describe development milestones and do not imply verified GameNative compatibility unless stated explicitly.
 
-## Unreleased
+
+## 0.1.1-alpha
 
 ### Added
 

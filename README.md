@@ -2,7 +2,7 @@
 
 A standalone compatibility patcher for a legitimate Steam copy of **Fallout: New Vegas** after GameNative has unpacked `FalloutNV.exe`.
 
-> **Development status:** `0.1.0-alpha`. The structural transformation has been validated against synthetic fixtures and a real GameNative-unpacked Steam executable copy. Android runtime validation of xNVSE initialization is still required before a public release.
+> **Development status:** `0.1.1-alpha`. The structural transformation has been validated against synthetic fixtures and a real GameNative-unpacked Steam executable copy. Android runtime validation of xNVSE initialization is still required before a public release.
 
 ## Why this project exists
 
