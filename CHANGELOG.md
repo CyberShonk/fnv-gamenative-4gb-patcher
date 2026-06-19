@@ -25,6 +25,14 @@ The project is still pre-release. Version numbers describe development milestone
 - Already-patched targets now produce a full condition report and no file changes.
 - Authenticode is no longer rejected solely because its directory fields are nonzero.
 
+### Validated
+
+- Confirmed on an AYN Thor using GameNative.
+- Successfully patched a GameNative/Steamless-unpacked `FalloutNV.exe`.
+- Confirmed that stale Authenticode metadata was repaired safely.
+- Confirmed that the game launches successfully after patching.
+- Confirmed that xNVSE logs recognize the executable as patched and xNVSE loads through the normal `FalloutNV.exe` launch path.
+
 ## 0.1.0-alpha
 
 ### Added
