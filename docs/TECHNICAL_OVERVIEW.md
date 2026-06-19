@@ -44,6 +44,33 @@ The prototype reads and validates:
 
 Fixed-width integer types are used because PE fields have defined binary widths.
 
+## Executable classification and no-write preflight
+
+Before creating a backup or temporary file, the patcher reads the complete target, parses its PE structures, and classifies its condition. The supported conditions are:
+
+- unpacked and ready to patch;
+- unpacked with the tested stale Authenticode metadata;
+- still Steam-wrapped because `.bind` is present;
+- already patched;
+- actual in-file Authenticode certificate data remains;
+- malformed Authenticode metadata;
+- unsupported Fallout identity or PE layout.
+
+Only the first two conditions are patchable. The complete transformed image is constructed and verified in memory before the backup is created. Packed, malformed, already-patched, and otherwise unsupported targets are not modified. `--verify` reports the condition and a recommended next action without attempting a patch.
+
+## Authenticode handling
+
+The PE security directory is unusual because its address is a file offset rather than an RVA. The tested GameNative/Steamless output removes the certificate data while leaving the original security-directory offset and size in the optional header. Those fields then point beyond the end of the unpacked file.
+
+The patcher distinguishes four states:
+
+- **None:** offset and size are both zero.
+- **Stale out-of-bounds metadata:** both fields are structurally valid, but the referenced range is outside the file. This specific state is cleared before patching.
+- **Real in-bounds certificate data:** the referenced range exists inside the file. The alpha refuses to modify it.
+- **Malformed metadata:** only one field is zero, alignment is invalid, the size is too small, or the entry is otherwise inconsistent. The alpha refuses to modify it.
+
+Clearing the stale state sets only the security-directory offset and size to zero. The original unpacked executable, including the stale fields, remains preserved in the backup for exact restoration.
+
 ## Large Address Aware
 
 The patcher enables the `IMAGE_FILE_LARGE_ADDRESS_AWARE` characteristic using bitwise OR. This preserves every unrelated existing characteristic while ensuring the LAA bit is set.
@@ -103,7 +130,7 @@ FalloutNV.exe.gn4gb-backup
 
 The backup deliberately does not end with `.exe`, reducing the chance that GameNative's executable-unpacking scan treats it as another launchable executable.
 
-A temporary file is constructed and verified before replacing the target. The installed result is then verified again.
+The entire transformed image is first constructed and verified in memory. Only then is the backup created, followed by a temporary file that is read back and verified before replacing the target. The installed result is verified again.
 
 ## Repeat safety
 

@@ -8,10 +8,21 @@ The project is still pre-release. Version numbers describe development milestone
 
 ### Added
 
+- Executable-condition classification with recommended next actions in `--verify` and patch failures.
+- Authenticode state classification for absent, stale out-of-bounds, real in-bounds, and malformed entries.
+- Safe repair of the stale security-directory pointer left by the tested GameNative/Steamless unpacking output.
+- No-write refusal tests for `.bind`, malformed metadata, real certificate data, unsupported identity, and malformed PE input.
+- Offline patch, verification, and byte-for-byte restoration validation against a real GameNative-unpacked Steam executable copy.
 - Initial public repository documentation.
 - Technical explanation of the PE transformation and xNVSE loading path.
 - Real-device testing requirements and issue-reporting guidance.
 - Security guidance for executable modification and antivirus reports.
+
+### Changed
+
+- The complete patch is now constructed and verified in memory before any backup or temporary file is created.
+- Already-patched targets now produce a full condition report and no file changes.
+- Authenticode is no longer rejected solely because its directory fields are nonzero.
 
 ## 0.1.0-alpha
 
@@ -30,7 +41,7 @@ The project is still pre-release. Version numbers describe development milestone
 
 ### Known limitations
 
-- A real GameNative-unpacked Steam executable has not yet been validated.
+- Android runtime xNVSE initialization has not yet been validated with this revision.
 - Steam is the only intended storefront for the first verified release.
 - The command-line interface is still provisional.
-- Executables using ASLR, Authenticode security data, or unsupported layouts are intentionally rejected.
+- Executables using ASLR, actual in-bounds Authenticode certificate data, malformed security metadata, or unsupported layouts are intentionally rejected.
