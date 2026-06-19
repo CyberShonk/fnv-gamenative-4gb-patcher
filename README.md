@@ -2,7 +2,7 @@
 
 A standalone compatibility patcher for a legitimate Steam copy of **Fallout: New Vegas** after GameNative has unpacked `FalloutNV.exe`.
 
-> **Development status:** `0.1.0-alpha`. The structural patcher and synthetic tests exist, but the project is not ready for a public release until it has been verified against a real GameNative-unpacked Steam executable on Android.
+> **Development status:** `0.1.1-alpha`. The structural transformation has been validated against synthetic fixtures and a real GameNative-unpacked Steam executable copy. Android runtime validation of xNVSE initialization is still required before a public release.
 
 ## Why this project exists
 
@@ -19,7 +19,9 @@ The project does not include Fallout: New Vegas, xNVSE, Steamless, or code and b
 ## What the patcher is intended to do
 
 - Validate that `FalloutNV.exe` is a supported 32-bit x86 Portable Executable.
-- Refuse to patch the still-packed Steam executable or an unsafe layout.
+- Classify the executable before writing any files and report the recommended next action.
+- Refuse to patch the still-packed Steam executable, malformed metadata, or an unsafe layout.
+- Repair the specific stale Authenticode pointer left by the tested GameNative/Steamless unpacking workflow.
 - Enable `IMAGE_FILE_LARGE_ADDRESS_AWARE` without replacing unrelated header flags.
 - Add a small `.gnvse` section that loads `nvse_steam_loader.dll` before the original game entry point.
 - Preserve the filename `FalloutNV.exe` so GameNative can launch it normally.
@@ -58,12 +60,15 @@ The alpha build intentionally refuses to patch when:
 - the Steam `.bind` wrapper is still present;
 - `nvse_steam_loader.dll` or `nvse_1_4.dll` is missing;
 - the executable uses `DYNAMIC_BASE`/ASLR;
-- an Authenticode security directory exists;
+- actual Authenticode certificate data remains inside the file;
+- the Authenticode security-directory entry is malformed;
 - no safe empty PE section-header slot is available;
 - the executable does not import `LoadLibraryA`;
 - the executable lacks expected Fallout: New Vegas identity strings.
 
-Unknown layouts should fail with a clear explanation rather than be patched speculatively.
+A nonzero Authenticode entry is accepted only when it is the tested stale form: both fields are structurally valid, but the referenced certificate range is outside the unpacked file because the certificate data was removed. The patcher clears that dead pointer before applying its own changes.
+
+Unknown layouts should fail with a clear condition report and recommended next action rather than be patched speculatively. Classification and the full patch transformation occur in memory before the backup or temporary file is created.
 
 ## Building
 
@@ -81,16 +86,16 @@ GitHub Actions cross-compiles a static 32-bit Windows executable using MinGW. Bu
 
 ## Testing status
 
-The synthetic PE test currently covers:
+The automated test currently covers:
 
-- unpatched verification;
-- patch creation;
-- Large Address Aware verification;
-- patch-marker verification;
+- clean unpacked verification and patching;
+- stale Authenticode detection, repair, and restoration;
+- refusal without file writes for `.bind`, malformed metadata, actual certificate data, an unsupported identity, and malformed PE input;
+- Large Address Aware and patch-marker verification;
 - repeat-run safety;
-- restoration.
+- byte-for-byte restoration.
 
-It does **not** prove compatibility with a real GameNative-unpacked executable. See [Testing](docs/TESTING.md) for the release validation matrix.
+The implementation has also completed an offline patch, verification, and byte-for-byte restoration cycle against a real GameNative-unpacked Steam executable copy. This does **not** establish Android runtime or xNVSE compatibility. See [Testing](docs/TESTING.md) for the release validation matrix.
 
 ## Independence and credits
 
@@ -98,12 +103,12 @@ This project is an independent implementation based on the documented Microsoft 
 
 Credits:
 
-- **Vault 13 Dweller** — reported the GameNative incompatibility that prompted the project.
-- **Roy Batty and LuthienAnarion** — creators of the established FNV 4GB Patcher and direct-launch workflow.
-- **The xNVSE team** — xNVSE and `nvse_steam_loader.dll`.
-- **Utkarsh Dalal and GameNative contributors** — GameNative.
-- **atom0s** — Steamless.
-- **CyberShonk** — independent implementation and maintenance.
+- **Vault 13 Dweller**: reported the GameNative incompatibility that prompted the project.
+- **Roy Batty and LuthienAnarion**: creators of the established FNV 4GB Patcher and direct-launch workflow.
+- **The xNVSE team**: xNVSE and `nvse_steam_loader.dll`.
+- **Utkarsh Dalal and GameNative contributors**: GameNative.
+- **atom0s**: Steamless.
+- **CyberShonk**: independent implementation and maintenance.
 
 Crediting a person or project does not imply endorsement.
 

@@ -2,16 +2,18 @@
 
 ## Current automated coverage
 
-The synthetic test constructs a controlled PE32/x86 fixture and verifies:
+The synthetic test constructs controlled PE32/x86 fixtures and verifies:
 
-1. the unpatched state is recognized;
-2. Large Address Aware is initially disabled;
-3. patching succeeds;
-4. a non-`.exe` backup is created;
-5. the `.gnvse` marker is detected;
-6. Large Address Aware is enabled;
-7. a second patch attempt is harmless;
-8. restoration returns the fixture to its original state.
+1. a clean unpacked executable is recognized and patched;
+2. stale out-of-bounds Authenticode metadata is recognized, cleared in the patched copy, and preserved in the backup;
+3. `.bind` causes a no-write refusal with a next-action report;
+4. malformed Authenticode metadata causes a no-write refusal;
+5. actual in-bounds certificate data causes a no-write refusal;
+6. an unsupported identity causes a no-write refusal;
+7. malformed PE input is reported without creating a backup or temporary file;
+8. Large Address Aware and the `.gnvse` marker are present after patching;
+9. a second patch attempt changes nothing;
+10. restoration returns the original bytes exactly.
 
 Run it with:
 
@@ -21,7 +23,7 @@ cmake --build build
 python3 tests/test_synthetic_pe.py build/FNVGameNativePatcher
 ```
 
-Synthetic testing verifies the transformer's internal assumptions. It does not establish real GameNative compatibility.
+The same implementation has completed an offline patch, verification, and byte-for-byte restoration cycle against a real GameNative-unpacked Steam executable copy exhibiting the stale Authenticode state. This validates the structural handling of that file, but it does not establish Android runtime behavior or successful xNVSE initialization.
 
 ## Required real-device validation
 
@@ -49,6 +51,7 @@ Record the following without committing game files or private paths:
 - SHA-256 after patching:
 - `.bind` section before unpacking:
 - `.bind` section after unpacking:
+- Authenticode state after unpacking (`none`, `stale`, `real`, or `malformed`):
 - LAA before patching:
 - LAA after patching:
 - `.gnvse` section after patching:
@@ -76,7 +79,10 @@ Confirm clear refusal or recovery when:
 
 - xNVSE files are missing;
 - `FalloutNV.exe` is missing;
-- the packed Steam `.bind` section is still present;
+- the packed Steam `.bind` section is still present and no backup is created;
+- stale out-of-bounds Authenticode metadata is repaired only in the patched copy;
+- actual in-bounds Authenticode data is refused without file writes;
+- malformed Authenticode metadata is refused without file writes;
 - the target is not a PE file;
 - the target is the wrong architecture;
 - an existing backup differs from the current unpatched target;

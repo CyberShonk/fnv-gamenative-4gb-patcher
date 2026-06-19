@@ -16,7 +16,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr const char* kToolName = "FNV GameNative 4GB + xNVSE Patcher";
-constexpr const char* kToolVersion = "0.1.0-alpha";
+constexpr const char* kToolVersion = "0.1.1-alpha";
 constexpr const char* kTargetName = "FalloutNV.exe";
 constexpr const char* kBackupName = "FalloutNV.exe.gn4gb-backup";
 constexpr const char* kTempName = "FalloutNV.exe.gn4gb-temp";
@@ -33,14 +33,38 @@ constexpr std::size_t kSectionHeaderSize = 40;
 constexpr std::size_t kImportDirectoryIndex = 1;
 constexpr std::size_t kSecurityDirectoryIndex = 4;
 
+enum class AuthenticodeState {
+    None,
+    StaleOutOfBounds,
+    RealInBounds,
+    Malformed
+};
+
+enum class ExecutableCondition {
+    Ready,
+    ReadyWithStaleAuthenticode,
+    StillPacked,
+    AlreadyPatched,
+    RealAuthenticodePresent,
+    MalformedAuthenticode,
+    UnsupportedIdentity
+};
+
+struct AuthenticodeInfo {
+    AuthenticodeState state{AuthenticodeState::None};
+    std::uint32_t offset{};
+    std::uint32_t size{};
+};
+
 struct Error : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
 std::uint16_t read_u16(const std::vector<std::uint8_t>& data, std::size_t offset) {
     if (offset + 2 > data.size()) throw Error("Unexpected end of file while reading a 16-bit value.");
-    return static_cast<std::uint16_t>(data[offset]) |
-           (static_cast<std::uint16_t>(data[offset + 1]) << 8);
+    const std::uint16_t low = static_cast<std::uint16_t>(data[offset]);
+    const std::uint16_t high = static_cast<std::uint16_t>(data[offset + 1]);
+    return static_cast<std::uint16_t>(low | static_cast<std::uint16_t>(high << 8));
 }
 
 std::uint32_t read_u32(const std::vector<std::uint8_t>& data, std::size_t offset) {
@@ -282,6 +306,142 @@ bool is_patched(const std::vector<std::uint8_t>& data, const PeImage& pe) {
     return has_section(pe, kSectionName) && contains_ascii(data, kMarker);
 }
 
+AuthenticodeInfo inspect_authenticode(const std::vector<std::uint8_t>& data, const PeImage& pe) {
+    const auto [offset, size] = data_directory(data, pe, kSecurityDirectoryIndex);
+    AuthenticodeInfo info{AuthenticodeState::None, offset, size};
+
+    if (offset == 0 && size == 0) return info;
+    if (offset == 0 || size == 0) {
+        info.state = AuthenticodeState::Malformed;
+        return info;
+    }
+
+    const std::uint64_t end = static_cast<std::uint64_t>(offset) + static_cast<std::uint64_t>(size);
+    if ((offset % 8u) != 0u || size < 8u || (size % 8u) != 0u) {
+        info.state = AuthenticodeState::Malformed;
+        return info;
+    }
+    if (static_cast<std::uint64_t>(offset) >= data.size() || end > data.size()) {
+        info.state = AuthenticodeState::StaleOutOfBounds;
+        return info;
+    }
+
+    info.state = AuthenticodeState::RealInBounds;
+    return info;
+}
+
+void clear_authenticode_directory(std::vector<std::uint8_t>& data, const PeImage& pe) {
+    const std::size_t directory_offset = pe.optional_offset + 96 + kSecurityDirectoryIndex * 8;
+    if (directory_offset + 8 > pe.optional_offset + pe.size_of_optional_header) {
+        throw Error("Security directory exceeds the optional header.");
+    }
+    write_u32(data, directory_offset, 0);
+    write_u32(data, directory_offset + 4, 0);
+}
+
+struct ExecutableInspection {
+    ExecutableCondition condition{ExecutableCondition::Ready};
+    AuthenticodeInfo authenticode;
+    bool fallout_identity{};
+    bool bind_present{};
+    bool patched{};
+    bool large_address_aware{};
+};
+
+ExecutableInspection inspect_executable(const std::vector<std::uint8_t>& data, const PeImage& pe) {
+    ExecutableInspection result;
+    result.authenticode = inspect_authenticode(data, pe);
+    result.fallout_identity = looks_like_fallout_nv(data);
+    result.bind_present = has_section(pe, ".bind");
+    result.patched = is_patched(data, pe);
+    result.large_address_aware = (pe.characteristics & kLargeAddressAware) != 0;
+
+    if (result.patched) result.condition = ExecutableCondition::AlreadyPatched;
+    else if (!result.fallout_identity) result.condition = ExecutableCondition::UnsupportedIdentity;
+    else if (result.bind_present) result.condition = ExecutableCondition::StillPacked;
+    else if (result.authenticode.state == AuthenticodeState::Malformed) result.condition = ExecutableCondition::MalformedAuthenticode;
+    else if (result.authenticode.state == AuthenticodeState::RealInBounds) result.condition = ExecutableCondition::RealAuthenticodePresent;
+    else if (result.authenticode.state == AuthenticodeState::StaleOutOfBounds) result.condition = ExecutableCondition::ReadyWithStaleAuthenticode;
+    else result.condition = ExecutableCondition::Ready;
+    return result;
+}
+
+const char* authenticode_state_text(AuthenticodeState state) {
+    switch (state) {
+        case AuthenticodeState::None: return "none";
+        case AuthenticodeState::StaleOutOfBounds: return "stale out-of-bounds metadata";
+        case AuthenticodeState::RealInBounds: return "certificate data present";
+        case AuthenticodeState::Malformed: return "malformed metadata";
+    }
+    return "unknown";
+}
+
+const char* condition_text(ExecutableCondition condition) {
+    switch (condition) {
+        case ExecutableCondition::Ready: return "unpacked and ready to patch";
+        case ExecutableCondition::ReadyWithStaleAuthenticode: return "unpacked and patchable after stale Authenticode repair";
+        case ExecutableCondition::StillPacked: return "still Steam-wrapped";
+        case ExecutableCondition::AlreadyPatched: return "already patched";
+        case ExecutableCondition::RealAuthenticodePresent: return "actual Authenticode certificate data is still present";
+        case ExecutableCondition::MalformedAuthenticode: return "malformed Authenticode metadata";
+        case ExecutableCondition::UnsupportedIdentity: return "not recognized as Fallout: New Vegas";
+    }
+    return "unknown";
+}
+
+bool is_patchable(ExecutableCondition condition) {
+    return condition == ExecutableCondition::Ready ||
+           condition == ExecutableCondition::ReadyWithStaleAuthenticode;
+}
+
+std::string recommended_action(ExecutableCondition condition) {
+    switch (condition) {
+        case ExecutableCondition::Ready:
+        case ExecutableCondition::ReadyWithStaleAuthenticode:
+            return "Run the patcher from this folder.";
+        case ExecutableCondition::StillPacked:
+            return "Run GameNative's Unpack Files operation again, then rerun --verify.";
+        case ExecutableCondition::AlreadyPatched:
+            return "Launch FalloutNV.exe through GameNative, use --verify for diagnostics, or use --restore to undo the patch.";
+        case ExecutableCondition::RealAuthenticodePresent:
+            return "Do not modify this file. Restore a clean copy and let GameNative unpack FalloutNV.exe again, then rerun --verify.";
+        case ExecutableCondition::MalformedAuthenticode:
+            return "Restore a clean copy of FalloutNV.exe, run GameNative's unpack operation again, then rerun --verify.";
+        case ExecutableCondition::UnsupportedIdentity:
+            return "Confirm that this is the Steam FalloutNV.exe from the game folder and restore the correct executable if necessary.";
+    }
+    return "Restore a clean executable and rerun --verify.";
+}
+
+void print_inspection_report(
+    const ExecutableInspection& inspection,
+    const fs::path& directory,
+    const char* heading = "Executable report") {
+
+    std::cout << heading << "\n"
+              << "  Condition: " << condition_text(inspection.condition) << "\n"
+              << "  Fallout NV identity marker: " << (inspection.fallout_identity ? "yes" : "no") << "\n"
+              << "  Steam .bind wrapper present: " << (inspection.bind_present ? "yes" : "no") << "\n"
+              << "  Authenticode state: " << authenticode_state_text(inspection.authenticode.state) << "\n";
+    if (inspection.authenticode.offset != 0 || inspection.authenticode.size != 0) {
+        std::cout << "  Authenticode file offset: 0x" << std::hex << inspection.authenticode.offset
+                  << "\n  Authenticode size: 0x" << inspection.authenticode.size << std::dec << "\n";
+    }
+    std::cout << "  Large Address Aware: " << (inspection.large_address_aware ? "yes" : "no") << "\n"
+              << "  GameNative xNVSE patch marker: " << (inspection.patched ? "yes" : "no") << "\n"
+              << "  nvse_steam_loader.dll present: " << (fs::exists(directory / "nvse_steam_loader.dll") ? "yes" : "no") << "\n"
+              << "  nvse_1_4.dll present: " << (fs::exists(directory / "nvse_1_4.dll") ? "yes" : "no") << "\n"
+              << "  Patchable: " << (is_patchable(inspection.condition) ? "yes" : "no") << "\n"
+              << "  Recommended next action: " << recommended_action(inspection.condition) << "\n";
+}
+
+[[noreturn]] void throw_unpatchable(const ExecutableInspection& inspection) {
+    throw Error(
+        std::string("Executable condition: ") + condition_text(inspection.condition) + ".\n" +
+        "No files were changed.\n" +
+        "Next action: " + recommended_action(inspection.condition));
+}
+
 void append_u32(std::vector<std::uint8_t>& output, std::uint32_t value) {
     output.push_back(static_cast<std::uint8_t>(value & 0xff));
     output.push_back(static_cast<std::uint8_t>((value >> 8) & 0xff));
@@ -338,17 +498,19 @@ std::vector<std::uint8_t> make_loader_payload(
     return payload;
 }
 
-std::vector<std::uint8_t> patch_image(std::vector<std::uint8_t> data) {
-    PeImage pe = parse_pe(data);
-    if (!looks_like_fallout_nv(data)) throw Error("Executable does not contain expected Fallout New Vegas identity strings.");
-    if (has_section(pe, ".bind")) {
-        throw Error("The Steam wrapper section '.bind' is still present. Run GameNative's Unpack Files operation first, then run this patcher.");
-    }
-    if (is_patched(data, pe)) return data;
+std::vector<std::uint8_t> patch_image(
+    std::vector<std::uint8_t> data,
+    const ExecutableInspection& inspection) {
 
-    const auto [security_offset, security_size] = data_directory(data, pe, kSecurityDirectoryIndex);
-    if (security_offset != 0 || security_size != 0) {
-        throw Error("Executable contains an Authenticode security directory. This alpha patcher will not invalidate signed files.");
+    PeImage pe = parse_pe(data);
+    if (!is_patchable(inspection.condition)) throw_unpatchable(inspection);
+
+    if (inspection.authenticode.state == AuthenticodeState::StaleOutOfBounds) {
+        clear_authenticode_directory(data, pe);
+        pe = parse_pe(data);
+        if (inspect_authenticode(data, pe).state != AuthenticodeState::None) {
+            throw Error("Internal verification failed while clearing stale Authenticode metadata.");
+        }
     }
 
     const std::uint32_t load_library_iat_rva = find_import_iat_rva(data, pe, "LoadLibraryA");
@@ -406,6 +568,9 @@ std::vector<std::uint8_t> patch_image(std::vector<std::uint8_t> data) {
     const PeImage patched = parse_pe(data);
     if (!is_patched(data, patched)) throw Error("Internal verification failed after constructing the patched executable.");
     if ((patched.characteristics & kLargeAddressAware) == 0) throw Error("Internal verification failed to enable Large Address Aware.");
+    if (inspect_authenticode(data, patched).state != AuthenticodeState::None) {
+        throw Error("Internal verification failed to normalize the Authenticode security directory.");
+    }
     return data;
 }
 
@@ -438,36 +603,70 @@ void patch(const fs::path& directory) {
     const fs::path target = directory / kTargetName;
     const fs::path backup = directory / kBackupName;
     const fs::path temp = directory / kTempName;
-    if (!fs::exists(target)) throw Error("FalloutNV.exe was not found in the current folder.");
-    verify_environment(directory);
-
-    const auto original = read_file(target);
-    const auto parsed = parse_pe(original);
-    if (is_patched(original, parsed)) {
-        std::cout << "FalloutNV.exe is already patched for GameNative 4GB + xNVSE loading.\n";
-        return;
+    if (!fs::exists(target)) {
+        throw Error("Status: FalloutNV.exe was not found in the current folder.\nNo files were changed.\nNext action: Copy the patcher into the folder containing FalloutNV.exe and run it again.");
     }
 
-    if (!fs::exists(backup)) {
+    const auto original = read_file(target);
+    PeImage parsed;
+    try {
+        parsed = parse_pe(original);
+    } catch (const std::exception& error) {
+        throw Error(
+            std::string("Status: FalloutNV.exe contains malformed or unsupported PE data.\n") +
+            "Details: " + error.what() + "\n" +
+            "No files were changed.\n" +
+            "Next action: Restore a clean FalloutNV.exe, run GameNative's unpack operation again, then rerun --verify.");
+    }
+
+    const ExecutableInspection inspection = inspect_executable(original, parsed);
+    if (inspection.condition == ExecutableCondition::AlreadyPatched) {
+        print_inspection_report(inspection, directory, "Patch result");
+        std::cout << "No files were changed.\n";
+        return;
+    }
+    if (!is_patchable(inspection.condition)) throw_unpatchable(inspection);
+
+    verify_environment(directory);
+
+    // Construct and validate the complete result in memory before creating or changing any file.
+    const auto patched = patch_image(original, inspection);
+    const auto patched_pe = parse_pe(patched);
+    if (!is_patched(patched, patched_pe) ||
+        (patched_pe.characteristics & kLargeAddressAware) == 0 ||
+        inspect_authenticode(patched, patched_pe).state != AuthenticodeState::None) {
+        throw Error("Internal preflight verification failed. No files were changed.");
+    }
+
+    if (fs::exists(backup)) {
+        const auto backup_data = read_file(backup);
+        PeImage backup_pe;
+        try {
+            backup_pe = parse_pe(backup_data);
+        } catch (const std::exception& error) {
+            throw Error(
+                std::string("Existing backup is malformed or unsupported: ") + error.what() + "\n" +
+                "No files were changed.\n" +
+                "Next action: Preserve or rename " + kBackupName + " before patching.");
+        }
+        if (is_patched(backup_data, backup_pe)) {
+            throw Error("Existing backup is already patched. No files were changed. Preserve or rename it, then restore a clean GameNative-unpacked FalloutNV.exe before continuing.");
+        }
+        if (backup_data != original) {
+            throw Error("An existing backup does not match the current unpatched FalloutNV.exe. No files were changed. Preserve or rename " + std::string(kBackupName) + " before patching this executable.");
+        }
+    } else {
         std::error_code ec;
         fs::copy_file(target, backup, fs::copy_options::none, ec);
         if (ec) throw Error("Unable to create the non-EXE backup " + backup.string() + ": " + ec.message());
-    } else {
-        const auto backup_data = read_file(backup);
-        const auto backup_pe = parse_pe(backup_data);
-        if (is_patched(backup_data, backup_pe)) {
-            throw Error("Existing backup is already patched. Move it aside and restore a clean GameNative-unpacked FalloutNV.exe before continuing.");
-        }
-        if (backup_data != original) {
-            throw Error("An existing backup does not match the current unpatched FalloutNV.exe. Preserve it manually, then remove or rename " + std::string(kBackupName) + " before patching this executable.");
-        }
     }
 
-    auto patched = patch_image(original);
     write_file(temp, patched);
     const auto round_trip = read_file(temp);
     const auto round_trip_pe = parse_pe(round_trip);
-    if (!is_patched(round_trip, round_trip_pe) || (round_trip_pe.characteristics & kLargeAddressAware) == 0) {
+    if (!is_patched(round_trip, round_trip_pe) ||
+        (round_trip_pe.characteristics & kLargeAddressAware) == 0 ||
+        inspect_authenticode(round_trip, round_trip_pe).state != AuthenticodeState::None) {
         std::error_code ignored;
         fs::remove(temp, ignored);
         throw Error("Temporary patched executable failed verification.");
@@ -475,13 +674,18 @@ void patch(const fs::path& directory) {
     replace_target_safely(target, temp, backup);
     const auto installed = read_file(target);
     const auto installed_pe = parse_pe(installed);
-    if (!is_patched(installed, installed_pe) || (installed_pe.characteristics & kLargeAddressAware) == 0) {
+    if (!is_patched(installed, installed_pe) ||
+        (installed_pe.characteristics & kLargeAddressAware) == 0 ||
+        inspect_authenticode(installed, installed_pe).state != AuthenticodeState::None) {
         throw Error("Installed FalloutNV.exe failed final verification. Restore with --restore before launching the game.");
     }
     std::cout << "Patched FalloutNV.exe successfully.\n"
-              << "  - Large Address Aware enabled\n"
-              << "  - nvse_steam_loader.dll will load before the original entry point\n"
-              << "  - Original saved as " << kBackupName << "\n";
+              << "  Large Address Aware enabled\n"
+              << "  nvse_steam_loader.dll will load before the original entry point\n";
+    if (inspection.authenticode.state == AuthenticodeState::StaleOutOfBounds) {
+        std::cout << "  Stale GameNative Authenticode metadata cleared\n";
+    }
+    std::cout << "  Original saved as " << kBackupName << "\n";
 }
 
 void restore(const fs::path& directory) {
@@ -503,17 +707,29 @@ void restore(const fs::path& directory) {
 
 void verify(const fs::path& directory) {
     const fs::path target = directory / kTargetName;
-    if (!fs::exists(target)) throw Error("FalloutNV.exe was not found in the current folder.");
+    if (!fs::exists(target)) {
+        std::cout << "Verification report\n"
+                  << "  Condition: FalloutNV.exe was not found\n"
+                  << "  Patchable: no\n"
+                  << "  Files changed: no\n"
+                  << "  Recommended next action: Run this tool from the folder containing FalloutNV.exe.\n";
+        return;
+    }
+
     const auto data = read_file(target);
-    const auto pe = parse_pe(data);
-    std::cout << "Verification report\n"
-              << "  PE32 x86: yes\n"
-              << "  Fallout NV identity marker: " << (looks_like_fallout_nv(data) ? "yes" : "no") << "\n"
-              << "  Steam .bind wrapper present: " << (has_section(pe, ".bind") ? "yes" : "no") << "\n"
-              << "  Large Address Aware: " << ((pe.characteristics & kLargeAddressAware) ? "yes" : "no") << "\n"
-              << "  GameNative xNVSE patch marker: " << (is_patched(data, pe) ? "yes" : "no") << "\n"
-              << "  nvse_steam_loader.dll present: " << (fs::exists(directory / "nvse_steam_loader.dll") ? "yes" : "no") << "\n"
-              << "  nvse_1_4.dll present: " << (fs::exists(directory / "nvse_1_4.dll") ? "yes" : "no") << "\n";
+    try {
+        const auto pe = parse_pe(data);
+        const auto inspection = inspect_executable(data, pe);
+        print_inspection_report(inspection, directory, "Verification report");
+        std::cout << "  Files changed: no\n";
+    } catch (const std::exception& error) {
+        std::cout << "Verification report\n"
+                  << "  Condition: malformed or unsupported PE data\n"
+                  << "  Details: " << error.what() << "\n"
+                  << "  Patchable: no\n"
+                  << "  Files changed: no\n"
+                  << "  Recommended next action: Restore a clean FalloutNV.exe, run GameNative's unpack operation again, then rerun --verify.\n";
+    }
 }
 
 void print_help() {
