@@ -137,52 +137,79 @@ def run(exe, cwd, *args, expected_returncode=0):
 def assert_no_generated_files(directory: pathlib.Path):
     assert not (directory / 'FalloutNV.exe.gn4gb-backup').exists()
     assert not (directory / 'FalloutNV.exe.gn4gb-temp').exists()
+    assert not (directory / 'FalloutNV.exe.unpacked.exe.gn4gb-backup').exists()
+    assert not (directory / 'FalloutNV.exe.unpacked.exe.gn4gb-temp').exists()
+
+
+def add_executable_pair(directory: pathlib.Path, **fixture_kwargs):
+    primary = directory / 'FalloutNV.exe'
+    cache = directory / 'FalloutNV.exe.unpacked.exe'
+    make_fixture(primary, **fixture_kwargs)
+    make_fixture(cache, **fixture_kwargs)
+    return primary, cache
 
 
 def test_clean_patch_restore(exe: pathlib.Path, root: pathlib.Path):
     temp = root / 'clean'
     temp.mkdir()
-    target = temp / 'FalloutNV.exe'
-    make_fixture(target)
+    target, cache = add_executable_pair(temp)
     add_xnvse_files(temp)
     original = target.read_bytes()
+    cache_original = cache.read_bytes()
 
     baseline = run(exe, temp, '--verify')
-    assert 'Condition: unpacked and ready to patch' in baseline
-    assert 'Authenticode state: none' in baseline
-    assert 'Patchable: yes' in baseline
+    assert baseline.count('Condition: unpacked and ready to patch') == 2
+    assert 'Persistent cache coverage: no' in baseline
 
     patched_output = run(exe, temp)
-    assert 'Patched FalloutNV.exe successfully.' in patched_output
+    assert "Patched GameNative's Fallout: New Vegas executable pair successfully." in patched_output
+    assert 'FalloutNV.exe.unpacked.exe: patched' in patched_output
+    assert 'FalloutNV.exe: patched' in patched_output
+    assert 'Persistent cache coverage: yes' in patched_output
+
     backup = temp / 'FalloutNV.exe.gn4gb-backup'
+    cache_backup = temp / 'FalloutNV.exe.unpacked.exe.gn4gb-backup'
     assert backup.exists()
+    assert cache_backup.exists()
     assert backup.read_bytes() == original
+    assert cache_backup.read_bytes() == cache_original
     assert not backup.name.lower().endswith('.exe')
+    assert not cache_backup.name.lower().endswith('.exe')
 
     report = run(exe, temp, '--verify')
-    assert 'Condition: already patched' in report
-    assert 'Large Address Aware: yes' in report
-    assert 'GameNative xNVSE patch marker: yes' in report
-    assert 'Patchable: no' in report
+    assert report.count('Condition: already patched') == 2
+    assert 'Persistent cache coverage: yes' in report
 
     before_repeat = target.read_bytes()
+    cache_before_repeat = cache.read_bytes()
     repeat = run(exe, temp)
-    assert 'Condition: already patched' in repeat
-    assert 'No files were changed.' in repeat
+    assert 'Both GameNative launch copies are already patched.' in repeat
     assert target.read_bytes() == before_repeat
+    assert cache.read_bytes() == cache_before_repeat
+
+    # Simulate GameNative copying its cached executable over the normal launch target.
+    target.write_bytes(cache.read_bytes())
+    copied_report = run(exe, temp, '--verify')
+    assert copied_report.count('Condition: already patched') == 2
+    assert 'Persistent cache coverage: yes' in copied_report
 
     restored = run(exe, temp, '--restore')
+    assert 'Restored FalloutNV.exe.unpacked.exe' in restored
     assert 'Restored FalloutNV.exe' in restored
     assert target.read_bytes() == original
-
+    assert cache.read_bytes() == cache_original
 
 def test_stale_authenticode_repair(exe: pathlib.Path, root: pathlib.Path):
     temp = root / 'stale-authenticode'
     temp.mkdir()
-    target = temp / 'FalloutNV.exe'
-    make_fixture(target, security_offset=0x2000, security_size=0x20)
+    target, cache = add_executable_pair(
+        temp,
+        security_offset=0x2000,
+        security_size=0x20,
+    )
     add_xnvse_files(temp)
     original = target.read_bytes()
+    cache_original = cache.read_bytes()
 
     baseline = run(exe, temp, '--verify')
     assert 'Condition: unpacked and patchable after stale Authenticode repair' in baseline
@@ -190,8 +217,9 @@ def test_stale_authenticode_repair(exe: pathlib.Path, root: pathlib.Path):
     assert 'Patchable: yes' in baseline
 
     patched_output = run(exe, temp)
-    assert 'Stale GameNative Authenticode metadata cleared' in patched_output
+    assert patched_output.count('Stale GameNative Authenticode metadata cleared') == 2
     assert (temp / 'FalloutNV.exe.gn4gb-backup').read_bytes() == original
+    assert (temp / 'FalloutNV.exe.unpacked.exe.gn4gb-backup').read_bytes() == cache_original
 
     patched = target.read_bytes()
     opt = 0x80 + 4 + 20
@@ -205,8 +233,9 @@ def test_stale_authenticode_repair(exe: pathlib.Path, root: pathlib.Path):
 
     run(exe, temp, '--restore')
     assert target.read_bytes() == original
+    assert cache.read_bytes() == cache_original
     restored_report = run(exe, temp, '--verify')
-    assert 'Authenticode state: stale out-of-bounds metadata' in restored_report
+    assert restored_report.count('Authenticode state: stale out-of-bounds metadata') == 2
 
 
 def test_refusal_cases(exe: pathlib.Path, root: pathlib.Path):
@@ -240,10 +269,10 @@ def test_refusal_cases(exe: pathlib.Path, root: pathlib.Path):
     for name, kwargs, condition, action in cases:
         temp = root / name
         temp.mkdir()
-        target = temp / 'FalloutNV.exe'
-        make_fixture(target, **kwargs)
+        target, cache = add_executable_pair(temp, **kwargs)
         add_xnvse_files(temp)
         original = target.read_bytes()
+        cache_original = cache.read_bytes()
 
         report = run(exe, temp, '--verify')
         assert f'Condition: {condition}' in report
@@ -252,9 +281,10 @@ def test_refusal_cases(exe: pathlib.Path, root: pathlib.Path):
 
         failure = run(exe, temp, expected_returncode=1)
         assert condition in failure
-        assert 'No files were changed.' in failure
+        assert 'No executable files were changed.' in failure
         assert 'Next action:' in failure
         assert target.read_bytes() == original
+        assert cache.read_bytes() == cache_original
         assert_no_generated_files(temp)
 
 
@@ -262,7 +292,9 @@ def test_malformed_pe_report(exe: pathlib.Path, root: pathlib.Path):
     temp = root / 'malformed-pe'
     temp.mkdir()
     target = temp / 'FalloutNV.exe'
+    cache = temp / 'FalloutNV.exe.unpacked.exe'
     target.write_bytes(b'not a PE file')
+    make_fixture(cache)
     add_xnvse_files(temp)
     original = target.read_bytes()
 
@@ -273,9 +305,78 @@ def test_malformed_pe_report(exe: pathlib.Path, root: pathlib.Path):
 
     failure = run(exe, temp, expected_returncode=1)
     assert 'malformed or unsupported PE data' in failure
-    assert 'No files were changed.' in failure
+    assert 'No executable files were changed.' in failure
     assert target.read_bytes() == original
     assert_no_generated_files(temp)
+
+
+
+
+def test_mismatched_pair_refusal(exe: pathlib.Path, root: pathlib.Path):
+    temp = root / 'mismatched-pair'
+    temp.mkdir()
+    target, cache = add_executable_pair(temp)
+    cache_data = bytearray(cache.read_bytes())
+    cache_data[0x700] ^= 0x01
+    cache.write_bytes(cache_data)
+    add_xnvse_files(temp)
+    primary_original = target.read_bytes()
+    cache_original = cache.read_bytes()
+
+    failure = run(exe, temp, expected_returncode=1)
+    assert 'do not originate from the same unpacked executable bytes' in failure
+    assert 'Let GameNative recreate a matching executable pair' in failure
+    assert target.read_bytes() == primary_original
+    assert cache.read_bytes() == cache_original
+    assert_no_generated_files(temp)
+
+
+def test_missing_cache_refusal(exe: pathlib.Path, root: pathlib.Path):
+    temp = root / 'missing-cache'
+    temp.mkdir()
+    target = temp / 'FalloutNV.exe'
+    make_fixture(target)
+    add_xnvse_files(temp)
+    original = target.read_bytes()
+
+    report = run(exe, temp, '--verify')
+    assert 'FalloutNV.exe.unpacked.exe present: no' in report
+    assert 'Persistent cache coverage: no' in report
+
+    failure = run(exe, temp, expected_returncode=1)
+    assert 'FalloutNV.exe.unpacked.exe was not found' in failure
+    assert 'Make GameNative rerun Unpack Files' in failure
+    assert 'Leave both executable names unchanged' in failure
+    assert target.read_bytes() == original
+    assert_no_generated_files(temp)
+
+
+def test_upgrade_from_primary_only_patch(exe: pathlib.Path, root: pathlib.Path):
+    temp = root / 'primary-only-upgrade'
+    temp.mkdir()
+    target, cache = add_executable_pair(temp)
+    add_xnvse_files(temp)
+    original = target.read_bytes()
+    cache_original = cache.read_bytes()
+
+    run(exe, temp)
+    patched_primary = target.read_bytes()
+    run(exe, temp, '--restore')
+
+    # Recreate the 0.1.1-alpha state: only FalloutNV.exe is patched and only
+    # its original backup exists.
+    target.write_bytes(patched_primary)
+    (temp / 'FalloutNV.exe.unpacked.exe.gn4gb-backup').unlink()
+
+    output = run(exe, temp)
+    assert 'FalloutNV.exe.unpacked.exe: patched' in output
+    assert 'FalloutNV.exe: already patched' in output
+    assert 'Persistent cache coverage: yes' in output
+    assert (temp / 'FalloutNV.exe.gn4gb-backup').read_bytes() == original
+    assert (temp / 'FalloutNV.exe.unpacked.exe.gn4gb-backup').read_bytes() == cache_original
+
+    report = run(exe, temp, '--verify')
+    assert report.count('Condition: already patched') == 2
 
 
 def main():
@@ -288,6 +389,9 @@ def main():
         test_stale_authenticode_repair(exe, root)
         test_refusal_cases(exe, root)
         test_malformed_pe_report(exe, root)
+        test_mismatched_pair_refusal(exe, root)
+        test_missing_cache_refusal(exe, root)
+        test_upgrade_from_primary_only_patch(exe, root)
 
     print('Synthetic PE architecture and safety tests passed.')
 

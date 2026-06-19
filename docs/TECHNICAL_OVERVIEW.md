@@ -2,13 +2,18 @@
 
 ## Purpose
 
-GameNative may unpack the Steam-protected `FalloutNV.exe` before launching it in its Android Windows-container environment. Unpacking changes the executable's bytes and therefore its hash. The established FNV 4GB Patcher recognizes specific known executable builds, so the changed file may be rejected even though it originated from a legitimate supported game installation.
+GameNative's Steam workflow uses Steamless to create `FalloutNV.exe.unpacked.exe`, then copies that file over the normal `FalloutNV.exe` launch target. A patch applied only to the normal filename can therefore be lost when GameNative uses its cached unpacked result again.
 
-This project uses a structural Portable Executable transformation instead of selecting a fixed patch solely from the executable hash.
+Version `0.1.2-alpha` treats the two files as one managed executable pair:
 
-## High-level transformation
+```text
+FalloutNV.exe.unpacked.exe  -> GameNative cache and overwrite source
+FalloutNV.exe               -> normal launch target
+```
 
-The intended launch chain is:
+Both receive the same structural PE transformation. GameNative's `FalloutNV.exe.original.exe` safety copy is not modified.
+
+## Launch chain
 
 ```text
 GameNative launches FalloutNV.exe
@@ -17,36 +22,51 @@ Windows/Wine begins at the patched PE entry point
         ↓
 The .gnvse loader calls LoadLibraryA("nvse_steam_loader.dll")
         ↓
-xNVSE's loader initializes its early hooks
+xNVSE initializes its early hooks
         ↓
 The loader restores CPU state
         ↓
 Execution jumps to the original FalloutNV.exe entry point
 ```
 
-The original game code remains in place. The patcher adds an early loading step and then resumes the original startup path.
+## Pair preflight
 
-## PE structures examined
+Before writing either executable, the patcher:
 
-The prototype reads and validates:
+1. Requires both managed files to exist.
+2. Reads and parses both complete files.
+3. Classifies each executable condition.
+4. Confirms their clean source bytes match when both clean references are available.
+5. Constructs every required patched image in memory.
+6. Verifies LAA, the `.gnvse` marker, and normalized Authenticode state.
+7. Validates any existing backup against its corresponding clean target.
 
-- DOS `MZ` header;
-- PE signature;
-- COFF header;
-- PE32 optional header;
-- executable characteristics;
-- section table;
-- import directory;
-- import lookup and address tables;
-- security directory;
-- original entry-point RVA;
-- image, file, and section alignment values.
+Any failure occurs before an executable is changed.
 
-Fixed-width integer types are used because PE fields have defined binary widths.
+## Installation order and rollback
 
-## Executable classification and no-write preflight
+The write sequence is deliberately cache-first:
 
-Before creating a backup or temporary file, the patcher reads the complete target, parses its PE structures, and classifies its condition. The supported conditions are:
+1. Create any missing non-`.exe` backups.
+2. Write and read back both temporary patched files.
+3. Replace `FalloutNV.exe.unpacked.exe`.
+4. Replace `FalloutNV.exe`.
+5. Verify both installed results.
+
+Securing the cache first closes the known overwrite path before the normal launch target is replaced. If a later installation step fails, already installed files are restored from their backups. Temporary files are removed, and newly created backups are removed after a complete rollback.
+
+## Backups
+
+```text
+FalloutNV.exe.unpacked.exe.gn4gb-backup
+FalloutNV.exe.gn4gb-backup
+```
+
+Neither filename ends in `.exe`, reducing the chance that GameNative treats a backup as another executable to scan or unpack.
+
+## Executable classification
+
+The supported conditions are:
 
 - unpacked and ready to patch;
 - unpacked with the tested stale Authenticode metadata;
@@ -56,51 +76,24 @@ Before creating a backup or temporary file, the patcher reads the complete targe
 - malformed Authenticode metadata;
 - unsupported Fallout identity or PE layout.
 
-Only the first two conditions are patchable. The complete transformed image is constructed and verified in memory before the backup is created. Packed, malformed, already-patched, and otherwise unsupported targets are not modified. `--verify` reports the condition and a recommended next action without attempting a patch.
+Only the first two conditions are newly patchable. An already-patched member can be retained while the other member is upgraded, which supports migration from `0.1.1-alpha`.
 
-## Authenticode handling
+## PE transformation
 
-The PE security directory is unusual because its address is a file offset rather than an RVA. The tested GameNative/Steamless output removes the certificate data while leaving the original security-directory offset and size in the optional header. Those fields then point beyond the end of the unpacked file.
+The implementation validates the DOS header, PE signature, COFF header, PE32 optional header, section table, imports, security directory, entry point, and alignment values.
 
-The patcher distinguishes four states:
+It then:
 
-- **None:** offset and size are both zero.
-- **Stale out-of-bounds metadata:** both fields are structurally valid, but the referenced range is outside the file. This specific state is cleared before patching.
-- **Real in-bounds certificate data:** the referenced range exists inside the file. The alpha refuses to modify it.
-- **Malformed metadata:** only one field is zero, alignment is invalid, the size is too small, or the entry is otherwise inconsistent. The alpha refuses to modify it.
-
-Clearing the stale state sets only the security-directory offset and size to zero. The original unpacked executable, including the stale fields, remains preserved in the backup for exact restoration.
-
-## Large Address Aware
-
-The patcher enables the `IMAGE_FILE_LARGE_ADDRESS_AWARE` characteristic using bitwise OR. This preserves every unrelated existing characteristic while ensuring the LAA bit is set.
-
-The flag allows a compatible 32-bit process to use addresses above the traditional 2 GB boundary when the host environment provides the larger address space. It does not add physical memory or guarantee that the game will allocate 4 GB.
-
-## Locating `LoadLibraryA`
-
-The loader does not assume a fixed Windows function address. The patcher parses the executable's import directory and locates the existing `LoadLibraryA` entry in the Import Address Table.
-
-At runtime, Windows or Wine resolves that IAT entry to the loaded implementation. The injected code calls through the resolved entry.
-
-If the expected import cannot be found, the prototype refuses to patch the executable.
-
-## The `.gnvse` section
-
-The patcher appends a new executable and readable PE section named `.gnvse` when a safe unused section-header slot is available.
-
-The section stores:
-
-- a short x86 loader payload;
-- the string `nvse_steam_loader.dll`;
-- a patch marker;
-- the original entry-point RVA for diagnostics and continuation.
-
-The PE section count, entry point, `SizeOfCode`, and `SizeOfImage` are updated using the executable's own alignment values.
+- clears only the tested stale out-of-bounds Authenticode directory entry;
+- finds the existing `LoadLibraryA` Import Address Table entry;
+- appends an executable/readable `.gnvse` section;
+- stores the loader, DLL name, patch marker, and original entry point;
+- redirects the PE entry point to the loader;
+- enables `IMAGE_FILE_LARGE_ADDRESS_AWARE` with bitwise OR;
+- updates section count, `SizeOfCode`, and `SizeOfImage`;
+- clears the obsolete PE checksum field.
 
 ## Loader behavior
-
-The loader payload performs the following conceptual operations:
 
 ```text
 save flags
@@ -112,61 +105,34 @@ restore flags
 jump to the original entry point
 ```
 
-Preserving CPU state reduces interference with the original startup environment.
+The loader uses the executable's existing resolved import rather than assuming a fixed Windows function address.
 
-## Why ASLR is currently rejected
+## Authenticode handling
 
-The current alpha payload uses absolute virtual addresses derived from the executable's preferred image base. An executable marked `DYNAMIC_BASE` may be relocated by ASLR, making those assumptions unsafe.
+The patcher distinguishes:
 
-The alpha therefore fails closed when `DYNAMIC_BASE` is present. A later implementation could use fully position-independent code or relocation entries, but that should not be added without a concrete compatibility need and test coverage.
+- **None** — offset and size are both zero.
+- **Stale out-of-bounds metadata** — structurally valid fields reference removed certificate data beyond the file; this tested GameNative/Steamless state is cleared.
+- **Real in-bounds certificate data** — refused.
+- **Malformed metadata** — refused.
 
-## Backup design
+The exact original bytes remain in the corresponding backup.
 
-The clean GameNative-unpacked executable is stored as:
+## Repeat safety and persistence reporting
 
-```text
-FalloutNV.exe.gn4gb-backup
-```
+The `.gnvse` section contains the marker `FNVGN4GB-V1`. The patcher uses the section and marker together to identify its own work.
 
-The backup deliberately does not end with `.exe`, reducing the chance that GameNative's executable-unpacking scan treats it as another launchable executable.
+`--verify` reports both file states and four persistence facts:
 
-The entire transformed image is first constructed and verified in memory. Only then is the backup created, followed by a temporary file that is read back and verified before replacing the target. The installed result is verified again.
+- whether `FalloutNV.exe` is patched;
+- whether the cached unpacked executable exists;
+- whether the cache is patched;
+- whether both files have persistent cache coverage.
 
-## Repeat safety
+## ASLR boundary
 
-The `.gnvse` section includes the marker:
+The current x86 payload uses addresses derived from the preferred image base. Files marked `DYNAMIC_BASE` are refused until a position-independent or relocation-aware implementation is justified and tested.
 
-```text
-FNVGN4GB-V1
-```
+## Independence
 
-The patcher uses the section and marker together to detect its own prior transformation. Re-running the patcher should report that the target is already patched rather than adding another section.
-
-## Structural validation versus hashes
-
-Hashes remain useful for diagnostics and identifying tested builds. They should not be the only validation mechanism because GameNative's unpacking is the reason the original known hash no longer applies.
-
-A release build should combine:
-
-- known tested hashes;
-- PE structure validation;
-- expected architecture and format;
-- version-resource inspection where available;
-- expected sections and imports;
-- Fallout-specific identity checks;
-- conservative failure for unknown layouts.
-
-## Independence from the established patcher
-
-The established FNV 4GB Patcher source was examined to understand the rejection and required outcome. This project uses an independently written structural implementation.
-
-It does not include the original project's:
-
-- source expressions;
-- fixed patch arrays;
-- hard-coded patch offsets;
-- binaries;
-- assets;
-- redistributed game executable.
-
-This should be described publicly as an independent implementation, not as a formal clean-room implementation.
+The project is an independently written structural implementation. It does not include source expressions, patch arrays, fixed offsets, binaries, assets, or game files from the established FNV 4GB Patcher.
