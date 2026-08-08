@@ -2,7 +2,7 @@
 
 A standalone compatibility patcher for a legitimate Steam copy of **Fallout: New Vegas** after GameNative has completed its executable-unpacking process.
 
-> **Development status:** `0.1.2-alpha`. The previous `0.1.1-alpha` transformation and xNVSE launch path were validated on an AYN Thor. This revision adds persistent handling for GameNative's cached `FalloutNV.exe.unpacked.exe`; that paired-file workflow still requires real-device validation before public release.
+> **Development status:** `0.1.3-alpha`. This revision adds a native Windows x86-64 GUI build for GameNative, retains the x86 console build, resolves targets relative to the patcher executable, and writes persistent diagnostics beside the patcher. The target transformation remains PE32-specific.
 
 ## Why this project exists
 
@@ -15,7 +15,7 @@ Patching only `FalloutNV.exe` is therefore not persistent. A later GameNative co
 
 This patcher independently examines the unpacked PE files, enables Large Address Aware support, and adds an early loader for the user's separately installed `nvse_steam_loader.dll`. It does not include Fallout: New Vegas, xNVSE, Steamless, GameNative files, or code and binaries from the existing FNV 4GB Patcher.
 
-## What 0.1.2-alpha does
+## What 0.1.3-alpha does
 
 - Requires both GameNative unpacked executable copies to be present.
 - Validates that both are supported PE32/x86 Fallout: New Vegas executables.
@@ -33,29 +33,50 @@ This patcher independently examines the unpacked PE files, enables Large Address
 
 The patcher does **not** modify GameNative's `FalloutNV.exe.original.exe` safety copy.
 
-## Intended user workflow
+## Windows builds
+
+Release packages contain two static executables:
+
+- `FNVGameNativePatcher.exe` — the primary GameNative build. This is a PE32+ x86-64 **Windows GUI** application.
+- `FNVGameNativePatcher-x86.exe` — retained for conventional 32-bit Windows and Wine environments. This remains a PE32 x86 **console** application.
+
+The patcher process architecture is independent of the target executable architecture. Both builds parse and modify the same PE32/x86 `FalloutNV.exe` and `FalloutNV.exe.unpacked.exe` bytes using fixed-width fields; the x64 patcher does not convert the game executables to PE32+.
+
+Both frontends share the same patching engine. The patcher resolves the target folder from its own module path with `GetModuleFileNameW()`, so a different launch working directory does not redirect the operation.
+
+Every invocation appends diagnostics to `FNVGameNativePatcher.log` beside the patcher. The log records version and architecture, executable and target paths, validation and PE-state output, backup and patch decisions, verification output, controlled refusals, exceptions, and final exit status. It does not contain executable contents.
+
+## GameNative workflow
 
 1. Install a legitimate Steam copy of Fallout: New Vegas through GameNative.
-2. Ensure **Unpack Files** is enabled.
-3. Launch the game once and allow GameNative's DRM handling to finish.
-4. Close the game.
-5. Install the current xNVSE release into the folder containing `FalloutNV.exe`.
-6. Copy `FNVGameNativePatcher.exe` into that folder and run it once.
-7. Launch the normal `FalloutNV.exe` entry through GameNative.
-8. Confirm xNVSE initialized using `nvse_steam_loader.log` and `nvse.log`.
-
-No executable renaming should be required. After both files are patched, the user should not need to disable **Unpack Files** for ordinary launches.
+2. Enable **Unpack Files**, launch once, and allow GameNative's DRM handling to finish.
+3. Close the game.
+4. Install the current xNVSE release into the folder containing `FalloutNV.exe`.
+5. Copy `FNVGameNativePatcher.exe` into that same folder.
+6. In the GameNative container settings, temporarily change **Executable Path** from `FalloutNV.exe` to `FNVGameNativePatcher.exe`.
+7. Launch the container. The patcher GUI opens and performs a read-only Verify on startup.
+8. Use **Patch** if verification reports that both managed executables are ready. Patch and Restore require confirmation.
+9. Close the patcher and restore **Executable Path** to `FalloutNV.exe`.
+10. Launch Fallout: New Vegas normally through GameNative.
 
 If `FalloutNV.exe.unpacked.exe` is missing, the patcher refuses to make a non-persistent change and explains how to let GameNative create the pair first.
 
+### Open Container limitation
+
+Launching the x64 patcher from GameNative's **Open Container** file manager starts the process, but GameNative 1.1.1 does not foreground the patcher window in the tested environment. Use the temporary **Executable Path** method above. The patcher does not impersonate `FalloutNV.exe` or `wfm.exe` to work around this behavior.
+
 ## Commands
 
+The x64 GUI opens when launched without arguments and automatically runs read-only Verify. Explicit arguments execute directly and are also used by automated tests:
+
 ```text
-FNVGameNativePatcher.exe
 FNVGameNativePatcher.exe --verify
+FNVGameNativePatcher.exe --patch
 FNVGameNativePatcher.exe --restore
 FNVGameNativePatcher.exe --help
 ```
+
+The x86 console build retains its command-line behavior. With no argument, the x86 build performs the patch operation.
 
 ## Current safety boundaries
 
@@ -80,29 +101,48 @@ See [Technical overview](docs/TECHNICAL_OVERVIEW.md) and [Testing](docs/TESTING.
 
 ## Building
 
+Native development tests:
+
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 python3 tests/test_synthetic_pe.py build/FNVGameNativePatcher
+python3 tests/test_unwritable_directory.py build/FNVGameNativePatcher
 ```
 
-GitHub Actions cross-compiles a static 32-bit Windows executable using MinGW. Development artifacts are not public releases.
+Static Windows builds:
+
+```bash
+i686-w64-mingw32-g++ \
+  -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+  -static -static-libgcc -static-libstdc++ \
+  src/main.cpp src/patcher.cpp \
+  -o FNVGameNativePatcher-x86.exe
+
+x86_64-w64-mingw32-g++ \
+  -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+  -static -static-libgcc -static-libstdc++ \
+  -mwindows \
+  src/windows_gui.cpp src/patcher.cpp \
+  -o FNVGameNativePatcher.exe
+```
+
+GitHub Actions builds both files, checks PE machine type and subsystem, runs the synthetic PE32 corpus through both Windows hosts, and compares patched bytes, backups, verification output, repeat-run behavior, and restoration results.
 
 ## Validation status
 
-`0.1.1-alpha` was validated on an AYN Thor with a real GameNative-unpacked Steam executable: patching succeeded, the game launched, and xNVSE initialized through the normal `FalloutNV.exe` path.
+`0.1.3-alpha` has passed:
 
-The `0.1.2-alpha` synthetic test suite additionally covers:
+- native synthetic safety tests and unwritable-directory refusal;
+- Windows x86 and x64 runtime fixture suites;
+- exact x86/x64 transformation and restoration equivalence;
+- PE architecture and subsystem checks;
+- real-device launch of the canonical `FNVGameNativePatcher.exe` x64 GUI through GameNative 1.1.1 on an AYN Thor;
+- read-only verification against the real managed executable pair;
+- persistent log creation beside the patcher;
+- successful Fallout New Vegas launch after restoring GameNative's Executable Path to `FalloutNV.exe`.
 
-- paired patching and exact restoration;
-- simulated copying of `FalloutNV.exe.unpacked.exe` over `FalloutNV.exe`;
-- missing-cache refusal;
-- mismatched-pair refusal;
-- repeat-run safety;
-- stale Authenticode repair;
-- upgrade from the prior primary-only patch state.
-
-Real-device validation of the paired persistence workflow remains required.
+The tested Open Container foreground limitation is described above.
 
 ## Independence and credits
 

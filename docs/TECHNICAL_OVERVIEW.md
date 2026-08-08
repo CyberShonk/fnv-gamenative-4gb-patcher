@@ -4,7 +4,7 @@
 
 GameNative's Steam workflow uses Steamless to create `FalloutNV.exe.unpacked.exe`, then copies that file over the normal `FalloutNV.exe` launch target. A patch applied only to the normal filename can therefore be lost when GameNative uses its cached unpacked result again.
 
-Version `0.1.2-alpha` treats the two files as one managed executable pair:
+Version `0.1.3-alpha` treats the two files as one managed executable pair:
 
 ```text
 FalloutNV.exe.unpacked.exe  -> GameNative cache and overwrite source
@@ -13,7 +13,29 @@ FalloutNV.exe               -> normal launch target
 
 Both receive the same structural PE transformation. GameNative's `FalloutNV.exe.original.exe` safety copy is not modified.
 
-## Launch chain
+## Frontends and shared engine
+
+The application is split into a shared patching engine and two Windows frontends:
+
+```text
+Windows x86 console frontend ─┐
+                              ├─ shared patcher engine
+Windows x64 GameNative GUI ───┘
+```
+
+`src/main.cpp` provides the console entrypoint. `src/windows_gui.cpp` provides the x64 Windows GUI entrypoint. `src/patcher.cpp` contains the shared patch, verify, restore, PE parsing, transactional installation, and reporting behavior exposed through `src/patcher.hpp`.
+
+The x64 process is PE32+ AMD64, but it still modifies the same PE32/x86 Fallout New Vegas executable format as the x86 host.
+
+## GameNative GUI launch
+
+The x64 build uses the Windows GUI subsystem. Its top-level window class is derived from the patcher's executable basename so GameNative can foreground the window when the same filename is selected as the container's Executable Path.
+
+A no-argument x64 launch opens the GUI and performs read-only Verify. Patch and Restore require user confirmation. Explicit command arguments execute directly without requiring GUI interaction, which keeps automated Windows runtime and architecture-equivalence tests possible.
+
+In the tested GameNative 1.1.1 Open Container environment, launching the patcher from the file manager starts the process but does not foreground its window. The supported workflow therefore temporarily selects the patcher as the container Executable Path, then restores `FalloutNV.exe` afterward.
+
+## Launch chain after patching
 
 ```text
 GameNative launches FalloutNV.exe
@@ -122,7 +144,7 @@ The exact original bytes remain in the corresponding backup.
 
 The `.gnvse` section contains the marker `FNVGN4GB-V1`. The patcher uses the section and marker together to identify its own work.
 
-`--verify` reports both file states and four persistence facts:
+Verify reports both file states and four persistence facts:
 
 - whether `FalloutNV.exe` is patched;
 - whether the cached unpacked executable exists;
@@ -132,6 +154,14 @@ The `.gnvse` section contains the marker `FNVGN4GB-V1`. The patcher uses the sec
 ## ASLR boundary
 
 The current x86 payload uses addresses derived from the preferred image base. Files marked `DYNAMIC_BASE` are refused until a position-independent or relocation-aware implementation is justified and tested.
+
+## Host architecture independence
+
+The patcher reads PE32 data from byte buffers with fixed-width integer fields. It does not cast file offsets to host pointers, use `sizeof(void*)` for PE fields, map target headers through host-native `IMAGE_NT_HEADERS`, or depend on compiler structure packing. A 64-bit patcher process therefore applies the same PE32 transformation as the 32-bit process.
+
+The Windows process resolves its own module path with `GetModuleFileNameW()` and uses the containing directory as the only default target directory. The current working directory is not used to select Fallout New Vegas files.
+
+Both Windows architectures append diagnostic output to `FNVGameNativePatcher.log` beside the patcher. Logging is textual and excludes binary dumps.
 
 ## Independence
 

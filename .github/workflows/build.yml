@@ -5,31 +5,85 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   linux-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
+      - name: Configure native test build
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-      - name: Build
+      - name: Build native test executable
         run: cmake --build build
-      - name: Synthetic PE test
+      - name: Run synthetic PE tests
         run: python3 tests/test_synthetic_pe.py build/FNVGameNativePatcher
+      - name: Test controlled unwritable-directory refusal
+        run: python3 tests/test_unwritable_directory.py build/FNVGameNativePatcher
 
-  windows-i686:
+  windows-builds:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install MinGW
-        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-i686
-      - name: Build static 32-bit Windows executable
-        run: >-
-          i686-w64-mingw32-g++
-          -std=c++17 -O2 -Wall -Wextra -Wpedantic
-          -static -static-libgcc -static-libstdc++
-          src/main.cpp -o FNVGameNativePatcher.exe
+      - name: Install MinGW cross-compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            g++-mingw-w64-i686 \
+            g++-mingw-w64-x86-64 \
+            binutils-mingw-w64
+      - name: Build static Windows x86 CLI and x64 GameNative GUI executables
+        run: |
+          mkdir -p dist
+          i686-w64-mingw32-g++ \
+            -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+            -static -static-libgcc -static-libstdc++ \
+            src/main.cpp src/patcher.cpp \
+            -o dist/FNVGameNativePatcher-x86.exe
+          x86_64-w64-mingw32-g++ \
+            -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+            -static -static-libgcc -static-libstdc++ \
+            -mwindows \
+            src/windows_gui.cpp src/patcher.cpp \
+            -o dist/FNVGameNativePatcher.exe
+      - name: Inspect Windows PE architecture and subsystem
+        run: |
+          file dist/FNVGameNativePatcher-x86.exe
+          file dist/FNVGameNativePatcher.exe
+          i686-w64-mingw32-objdump -f dist/FNVGameNativePatcher-x86.exe
+          x86_64-w64-mingw32-objdump -f dist/FNVGameNativePatcher.exe
+          python3 tests/inspect_pe_machine.py \
+            dist/FNVGameNativePatcher-x86.exe x86
+          python3 tests/inspect_pe_machine.py \
+            dist/FNVGameNativePatcher.exe x64
+          python3 tests/inspect_pe_subsystem.py \
+            dist/FNVGameNativePatcher-x86.exe console
+          python3 tests/inspect_pe_subsystem.py \
+            dist/FNVGameNativePatcher.exe gui
       - uses: actions/upload-artifact@v4
         with:
-          name: FNVGameNativePatcher-windows-i686
-          path: FNVGameNativePatcher.exe
+          name: FNVGameNativePatcher-windows
+          path: |
+            dist/FNVGameNativePatcher-x86.exe
+            dist/FNVGameNativePatcher.exe
+          if-no-files-found: error
+
+  windows-runtime-tests:
+    runs-on: windows-latest
+    needs: windows-builds
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: FNVGameNativePatcher-windows
+          path: dist
+      - name: Run x86 host against PE32 fixtures
+        run: python tests/test_synthetic_pe.py dist/FNVGameNativePatcher-x86.exe
+      - name: Run x64 GUI host against PE32 fixtures through explicit commands
+        run: python tests/test_synthetic_pe.py dist/FNVGameNativePatcher.exe
+      - name: Compare x86 and x64 transformations
+        run: >-
+          python tests/test_architecture_equivalence.py
+          dist/FNVGameNativePatcher-x86.exe
+          dist/FNVGameNativePatcher.exe

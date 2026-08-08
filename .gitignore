@@ -9,3 +9,6 @@ FalloutNV.exe.gn4gb-temp
 
 # Private local project material
 /.private/
+
+__pycache__/
+*.pyc

@@ -4,6 +4,45 @@ All notable changes to this project will be documented here.
 
 The project is still pre-release. Version numbers describe development milestones and do not imply verified GameNative compatibility unless stated explicitly.
 
+## 0.1.3-alpha
+
+### Added
+
+- Canonical Windows x86-64 GUI artifact `FNVGameNativePatcher.exe`, used as the primary GameNative build.
+- Explicit retained x86 console artifact `FNVGameNativePatcher-x86.exe`.
+- Verify, Patch, Restore, and Close controls in the x64 GUI.
+- Executable-directory resolution through `GetModuleFileNameW()` on Windows.
+- Persistent `FNVGameNativePatcher.log` diagnostics beside the patcher.
+- PE machine-type and subsystem assertions.
+- x86/x64 transformation-equivalence tests.
+- Controlled tests for different launch working directories, missing required files, incompatible backups, and unwritable patcher directories.
+- Shared patcher engine separated from the CLI and Windows GUI frontends.
+
+### Changed
+
+- The x64 GameNative artifact now uses the Windows GUI subsystem instead of the console subsystem.
+- A no-argument x64 launch opens the GUI and performs read-only Verify instead of immediately patching.
+- Explicit `--patch`, `--verify`, `--restore`, and `--help` arguments remain available for direct execution and automated validation.
+- Release and CI packaging use unambiguous architecture names and verify x86 CUI versus x64 GUI subsystem identity.
+- The documented GameNative workflow temporarily selects `FNVGameNativePatcher.exe` as the container Executable Path, then restores `FalloutNV.exe` after patching.
+
+### Validated
+
+- Native synthetic safety and unwritable-directory tests pass.
+- Windows x86 and x64 runtime fixture suites pass.
+- Windows x86 and x64 hosts produce identical PE32 transformations, backups, normalized verification results, repeat-run behavior, and exact restoration.
+- The canonical `FNVGameNativePatcher.exe` x64 GUI filename launches in the foreground when selected as the Executable Path in GameNative 1.1.1 on an AYN Thor.
+- The x64 GUI resolves the real Fallout New Vegas directory, verifies the managed executable pair, and writes the persistent log.
+- Fallout New Vegas launches successfully after restoring GameNative's Executable Path to `FalloutNV.exe`.
+
+### Known limitation
+
+- Launching the x64 patcher from GameNative's Open Container file manager starts the process but does not foreground its window in the tested GameNative 1.1.1 environment. Use the temporary Executable Path workflow instead.
+
+### Unchanged
+
+- The patch remains a coordinated, fail-closed PE32 transformation of `FalloutNV.exe` and `FalloutNV.exe.unpacked.exe`.
+- Backup compatibility checks, in-memory preflight, temporary-file verification, cache-first installation, rollback, verification-only mode, repeat-run behavior, and restoration remain in place.
 
 ## 0.1.2-alpha
 
@@ -26,7 +65,6 @@ The project is still pre-release. Version numbers describe development milestone
 ### Validation status
 
 - Synthetic pair patching, repeat safety, simulated cache overwrite, restoration, mismatched-pair refusal, missing-cache refusal, and `0.1.1-alpha` upgrade behavior pass locally.
-- Real-device validation of this cache-persistence revision is still required before release.
 
 ## 0.1.1-alpha
 
@@ -73,7 +111,5 @@ The project is still pre-release. Version numbers describe development milestone
 
 ### Known limitations
 
-- Android runtime xNVSE initialization has not yet been validated with this revision.
 - Steam is the only intended storefront for the first verified release.
-- The command-line interface is still provisional.
 - Executables using ASLR, actual in-bounds Authenticode certificate data, malformed security metadata, or unsupported layouts are intentionally rejected.
